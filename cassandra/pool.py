@@ -252,6 +252,31 @@ class Host(object):
         dc = (" %s" % (self._datacenter,)) if self._datacenter else ""
         return "<%s: %s%s>" % (self.__class__.__name__, self.endpoint, dc)
 
+class Tablet(object):
+    """
+    Represents a single ScyllaDB tablet.
+    """
+    keyspaceName = ""
+    tableId = None
+    lastToken = 0
+    tableName = ""
+    tabletCount = 0
+    newReplicas = None
+    replicas = None
+    stage = ""
+
+    lock = None
+
+    def __init__(self, keyspaceName = "", tableId = None, lastToken = 0, tableName = "", tabletCount = 0, newReplicas = None, replicas = None, stage = ""):
+        self.keyspaceName = keyspaceName
+        self.tableId = tableId
+        self.tableName = tableName
+        self.tabletCount = tabletCount
+        self.lastToken = lastToken
+        self.newReplicas = newReplicas
+        self.replicas = replicas
+        self.stage = stage
+        self.lock = RLock()
 
 class _ReconnectionHandler(object):
     """
@@ -439,7 +464,7 @@ class HostConnection(object):
 
         log.debug("Finished initializing connection for host %s", self.host)
 
-    def _get_connection_for_routing_key(self, routing_key=None):
+    def _get_connection_for_routing_key(self, routing_key=None, keyspace=None, table=None):
         if self.is_shutdown:
             raise ConnectionException(
                 "Pool for %s is shutdown" % (self.host,), self.host)
@@ -450,7 +475,29 @@ class HostConnection(object):
         shard_id = None
         if not self._session.cluster.shard_aware_options.disable and self.host.sharding_info and routing_key:
             t = self._session.cluster.metadata.token_map.token_class.from_key(routing_key)
-            shard_id = self.host.sharding_info.shard_id_from_token(t.value)
+            
+            if keyspace is None:
+                keyspace = self._keyspace
+            tablets = self._session.cluster._load_balancing_policy._cluster_metadata.all_tablets()
+
+            l = -1
+            for i, tablet in enumerate(tablets): 
+                if tablet.keyspaceName == keyspace and tablet.tableName == table: 
+                    l = i
+                    break
+            
+            if l != -1:
+                r = l + tablets[l].tabletCount
+                print(l, r)
+                while l < r:
+                    m = (l + r) // 2
+                    if tablets[m].lastToken < t.value:
+                        l = m + 1
+                    else:
+                        r = m
+                shard_id = tablets[l].replicas[0][1]
+            else:
+                shard_id = self.host.sharding_info.shard_id_from_token(t.value)
 
         conn = self._connections.get(shard_id)
 
@@ -496,15 +543,15 @@ class HostConnection(object):
             return random.choice(active_connections)
         return random.choice(list(self._connections.values()))
 
-    def borrow_connection(self, timeout, routing_key=None):
-        conn = self._get_connection_for_routing_key(routing_key)
+    def borrow_connection(self, timeout, routing_key=None, keyspace=None, table=None):
+        conn = self._get_connection_for_routing_key(routing_key, keyspace, table)
         start = time.time()
         remaining = timeout
         last_retry = False
         while True:
             if conn.is_closed:
                 # The connection might have been closed in the meantime - if so, try again
-                conn = self._get_connection_for_routing_key(routing_key)
+                conn = self._get_connection_for_routing_key(routing_key, keyspace, table)
             with conn.lock:
                 if (not conn.is_closed or last_retry) and conn.in_flight < conn.max_request_id:
                     # On last retry we ignore connection status, since it is better to return closed connection than

@@ -126,6 +126,8 @@ class Metadata(object):
         self._hosts = {}
         self._host_id_by_endpoint = {}
         self._hosts_lock = RLock()
+        self._tablets = {}
+        self._tablets_lock = RLock()
 
     def export_schema_as_string(self):
         """
@@ -391,6 +393,16 @@ class Metadata(object):
         with self._hosts_lock:
             return list(self._hosts.items())
 
+    def all_tablets(self):
+        """
+        Returns a list of all known :class`.Tablet` instances in the cluster.
+        """
+        with self._tablets_lock:
+            return self._tablets
+        
+    def setTablets(self, tablets):
+        with self._tablets_lock:
+            self._tablets = tablets
 
 REPLICATION_STRATEGY_CLASS_PREFIX = "org.apache.cassandra.locator."
 

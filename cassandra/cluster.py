@@ -27,6 +27,7 @@ from functools import partial, wraps
 from itertools import groupby, count, chain
 import json
 import logging
+import threading
 from warnings import warn
 from random import random
 import re
@@ -73,7 +74,7 @@ from cassandra.policies import (TokenAwarePolicy, DCAwareRoundRobinPolicy, Simpl
                                 NeverRetryPolicy)
 from cassandra.pool import (Host, _ReconnectionHandler, _HostReconnectionHandler,
                             HostConnectionPool, HostConnection,
-                            NoConnectionsAvailable)
+                            NoConnectionsAvailable, Tablet)
 from cassandra.query import (SimpleStatement, PreparedStatement, BoundStatement,
                              BatchStatement, bind_params, QueryTrace, TraceUnavailable,
                              named_tuple_factory, dict_factory, tuple_factory, FETCH_SIZE_UNSET,
@@ -938,6 +939,11 @@ class Cluster(object):
     establish connection pools. This can cause a rush of connections and queries if not mitigated with this factor.
     """
 
+    tablet_refresh_time = 1
+    """
+    The time at which the system.tablets table is polled periodically
+    """
+
     prepare_on_all_hosts = True
     """
     Specifies whether statements should be prepared on all hosts, or just one.
@@ -1124,6 +1130,7 @@ class Cluster(object):
                  schema_metadata_page_size=1000,
                  address_translator=None,
                  status_event_refresh_window=2,
+                 table_refresh_time=1,
                  prepare_on_all_hosts=True,
                  reprepare_on_up=True,
                  execution_profiles=None,
@@ -1364,6 +1371,7 @@ class Cluster(object):
         self.schema_event_refresh_window = schema_event_refresh_window
         self.topology_event_refresh_window = topology_event_refresh_window
         self.status_event_refresh_window = status_event_refresh_window
+        self.tablet_refresh_time = table_refresh_time
         self.connect_timeout = connect_timeout
         self.prepare_on_all_hosts = prepare_on_all_hosts
         self.reprepare_on_up = reprepare_on_up
@@ -1416,7 +1424,7 @@ class Cluster(object):
         self.control_connection = ControlConnection(
             self, self.control_connection_timeout,
             self.schema_event_refresh_window, self.topology_event_refresh_window,
-            self.status_event_refresh_window,
+            self.status_event_refresh_window, self.tablet_refresh_time,
             schema_metadata_enabled, token_metadata_enabled,
             schema_meta_page_size=schema_metadata_page_size)
 
@@ -3513,6 +3521,8 @@ class ControlConnection(object):
     _SELECT_PEERS_NO_TOKENS_V2 = "SELECT host_id, peer, peer_port, data_center, rack, native_address, native_port, release_version, schema_version FROM system.peers_v2"
     _SELECT_SCHEMA_PEERS_V2 = "SELECT host_id, peer, peer_port, native_address, native_port, schema_version FROM system.peers_v2"
 
+    _SELECT_TABLETS = "SELECT * FROM system.tablets"
+
     _MINIMUM_NATIVE_ADDRESS_DSE_VERSION = Version("6.0.0")
 
     class PeersQueryType(object):
@@ -3527,6 +3537,7 @@ class ControlConnection(object):
     _schema_event_refresh_window = None
     _topology_event_refresh_window = None
     _status_event_refresh_window = None
+    _tablet_refresh_time = None
 
     _schema_meta_enabled = True
     _token_meta_enabled = True
@@ -3541,6 +3552,7 @@ class ControlConnection(object):
                  schema_event_refresh_window,
                  topology_event_refresh_window,
                  status_event_refresh_window,
+                 tablet_refresh_time=1,
                  schema_meta_enabled=True,
                  token_meta_enabled=True,
                  schema_meta_page_size=1000):
@@ -3553,6 +3565,7 @@ class ControlConnection(object):
         self._schema_event_refresh_window = schema_event_refresh_window
         self._topology_event_refresh_window = topology_event_refresh_window
         self._status_event_refresh_window = status_event_refresh_window
+        self._tablet_refresh_time = tablet_refresh_time
         self._schema_meta_enabled = schema_meta_enabled
         self._token_meta_enabled = token_meta_enabled
         self._schema_meta_page_size = schema_meta_page_size
@@ -3617,6 +3630,11 @@ class ControlConnection(object):
 
         raise NoHostAvailable("Unable to connect to any servers", errors)
 
+    def _run_periodically(self, connection, interval):
+        while True:
+            time.sleep(interval)
+            self._refresh_tablets(connection=connection)
+    
     def _try_connect(self, host):
         """
         Creates a new Connection, registers for pushed events, and refreshes
@@ -3658,6 +3676,9 @@ class ControlConnection(object):
                 "SCHEMA_CHANGE": partial(_watch_callback, self_weakref, '_handle_schema_change')
             }, register_timeout=self._timeout)
 
+            background_thread = threading.Thread(target=self._run_periodically, args=(connection, self._tablet_refresh_time,), daemon=True)
+            background_thread.start()
+
             sel_peers = self._get_peers_query(self.PeersQueryType.PEERS, connection)
             sel_local = self._SELECT_LOCAL if self._token_meta_enabled else self._SELECT_LOCAL_NO_TOKENS
             peers_query = QueryMessage(query=sel_peers, consistency_level=ConsistencyLevel.ONE)
@@ -3679,6 +3700,11 @@ class ControlConnection(object):
             shared_results = (peers_result, local_result)
             self._refresh_node_list_and_token_map(connection, preloaded_results=shared_results)
             self._refresh_schema(connection, preloaded_results=shared_results, schema_agreement_wait=-1)
+
+            sel_tablets = self._SELECT_TABLETS
+            tablets_query = QueryMessage(query=sel_tablets, consistency_level=ConsistencyLevel.ONE)
+            tablets_result = connection.wait_for_response(tablets_query, timeout=self._timeout)
+            self._refresh_tablets(connection, preloaded_result=tablets_result)
         except Exception:
             connection.close()
             raise
@@ -3964,11 +3990,51 @@ class ControlConnection(object):
             log.debug("[control connection] Rebuilding token map due to topology changes")
             self._cluster.metadata.rebuild_token_map(partitioner, token_map)
 
+    def _refresh_tablets(self, connection, preloaded_result=None,
+                                         force_token_rebuild=False):
+        print("REFRESH")
+        if preloaded_result:
+            log.debug("[control connection] Refreshing tablet list using preloaded result")
+            tablets_result = preloaded_result
+        else:
+            sel_tablets = self._SELECT_TABLETS
+            tablets_query = QueryMessage(query=sel_tablets, consistency_level=ConsistencyLevel.ONE)
+            tablets_result = connection.wait_for_response(
+                tablets_query, timeout=self._timeout)
+        tablets_result = dict_factory(tablets_result.column_names, tablets_result.parsed_rows)
+
+        tablets = []
+        for row in tablets_result:
+            if not self._is_valid_tablet(row):
+                log.warning(
+                    "Found an invalid row for tablet (%s). Ignoring tablet." %
+                    _NodeInfo.get_broadcast_rpc_address(row))
+                continue
+
+            tablet = Tablet()
+            tablet.keyspaceName = row.get("keyspace_name")
+            tablet.tableName = row.get("table_name")
+            tablet.tableId = row.get("table_id")
+            tablet.tabletCount = row.get("tablet_count")
+            tablet.lastToken = row.get("last_token")
+            tablet.newReplicas = row.get("new_replicas")
+            tablet.replicas = row.get("replicas")
+            tablet.stage = row.get("stage")
+
+            tablets.append(tablet)
+        
+        self._cluster.metadata.setTablets(tablets)
+        return ""
+    
     @staticmethod
     def _is_valid_peer(row):
         return bool(_NodeInfo.get_broadcast_rpc_address(row) and row.get("host_id") and
                     row.get("data_center") and row.get("rack") and
                     ('tokens' not in row or row.get('tokens')))
+
+    @staticmethod
+    def _is_valid_tablet(row):
+        return bool(row.get("replicas") is not None and len(row.get("replicas")) != 0 and row.get("table_name") is not None)
 
     def _update_location_info(self, host, datacenter, rack):
         if host.datacenter == datacenter and host.rack == rack:
@@ -4571,7 +4637,9 @@ class ResponseFuture(object):
         connection = None
         try:
             # TODO get connectTimeout from cluster settings
-            connection, request_id = pool.borrow_connection(timeout=2.0, routing_key=self.query.routing_key if self.query else None)
+            connection, request_id = pool.borrow_connection(timeout=2.0, routing_key=self.query.routing_key if self.query else None, 
+                                                            keyspace=self.query.keyspace if self.query else None, 
+                                                            table=self.query.table if self.query else None)
             self._connection = connection
             result_meta = self.prepared_statement.result_metadata if self.prepared_statement else []
 
