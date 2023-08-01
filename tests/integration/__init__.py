@@ -372,7 +372,7 @@ lessthandse60 = unittest.skipUnless(DSE_VERSION and DSE_VERSION < Version('6.0')
 # 1. unittest doesn't skip setUpClass when used on class and we need it sometimes
 # 2. unittest doesn't have conditional xfail, and I prefer to use pytest than custom decorator
 # 3. unittest doesn't have a reason argument, so you don't see the reason in pytest report
-requires_collection_indexes = pytest.mark.skipif(SCYLLA_VERSION is not None and Version(SCYLLA_VERSION.split(':')[1]) < Version('5.2'),
+requires_collection_indexes = pytest.mark.skipif(SCYLLA_VERSION is not None and (len(SCYLLA_VERSION.split('/')) != 0 or Version(SCYLLA_VERSION.split(':')[1]) < Version('5.2')),
                                               reason='Scylla supports collection indexes from 5.2 onwards') 
 requires_custom_indexes = pytest.mark.skipif(SCYLLA_VERSION is not None,
                                           reason='Scylla does not support SASI or any other CUSTOM INDEX class')
@@ -501,7 +501,7 @@ def start_cluster_wait_for_up(cluster):
 
 
 def use_cluster(cluster_name, nodes, ipformat=None, start=True, workloads=None, set_keyspace=True, ccm_options=None,
-                configuration_options=None, dse_options=None, use_single_interface=USE_SINGLE_INTERFACE):
+                configuration_options=None, dse_options=None, use_single_interface=USE_SINGLE_INTERFACE, use_tablets=False):
     configuration_options = configuration_options or {}
     dse_options = dse_options or {}
     workloads = workloads or []
@@ -607,15 +607,21 @@ def use_cluster(cluster_name, nodes, ipformat=None, start=True, workloads=None, 
                 CCM_CLUSTER.set_dse_configuration_options(dse_options)
             else:
                 if SCYLLA_VERSION:
+                    log.debug("WRRRRRRRRRRRRRRRRRRR")
                     # `experimental: True` enable all experimental features.
                     # CDC is causing an issue (can't start cluster with multiple seeds)
                     # Selecting only features we need for tests, i.e. anything but CDC.
+                    log.debug(ccm_options)
                     CCM_CLUSTER = CCMScyllaCluster(path, cluster_name, **ccm_options)
-                    CCM_CLUSTER.set_configuration_options({'experimental_features': ['lwt', 'udf'], 'start_native_transport': True})
+                    if use_tablets:
+                        CCM_CLUSTER.set_configuration_options({'experimental_features': ['lwt', 'udf', 'consistent-topology-changes', 'tablets'], 'start_native_transport': True})
+                    else:
+                        CCM_CLUSTER.set_configuration_options({'experimental_features': ['lwt', 'udf'], 'start_native_transport': True})
                 else:
                     CCM_CLUSTER = CCMCluster(path, cluster_name, **ccm_options)
                     CCM_CLUSTER.set_configuration_options({'start_native_transport': True})
                 if Version(cassandra_version) >= Version('2.2'):
+                    log.debug("JJJJJJJJJJ")
                     CCM_CLUSTER.set_configuration_options({'enable_user_defined_functions': True})
                     if Version(cassandra_version) >= Version('3.0'):
                         CCM_CLUSTER.set_configuration_options({'enable_scripted_user_defined_functions': True})
@@ -630,6 +636,7 @@ def use_cluster(cluster_name, nodes, ipformat=None, start=True, workloads=None, 
                 # Since scylla CCM doesn't yet support this options, we skip it
                 # , use_single_interface=use_single_interface)
                 CCM_CLUSTER.populate(nodes, ipformat=ipformat)
+                log.debug("DOOONE")
     try:
         jvm_args = []
 

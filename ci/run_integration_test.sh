@@ -44,3 +44,14 @@ export SCYLLA_VERSION=${SCYLLA_RELEASE}
 export MAPPED_SCYLLA_VERSION=3.11.4
 PROTOCOL_VERSION=4 EVENT_LOOP_MANAGER=libev pytest -rf --import-mode append $*
 
+# download version
+
+export SCYLLA_UNSTABLE='unstable/master:2023-07-31T05:54:06Z'
+export SCYLLA_VERSION=${SCYLLA_UNSTABLE}
+
+ccm create scylla-driver-tablets-temp -n 3 --scylla --version ${SCYLLA_UNSTABLE}
+ccm remove
+
+# run tablet tests
+
+PROTOCOL_VERSION=4 EVENT_LOOP_MANAGER=libev pytest -rf --import-mode append tests/integration/standard/test_tablets.py
