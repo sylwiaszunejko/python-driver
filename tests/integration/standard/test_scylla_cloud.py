@@ -6,15 +6,20 @@ from ccmlib.utils.sni_proxy import refresh_certs, get_cluster_info, start_sni_pr
 
 from tests.integration import use_cluster
 from cassandra.cluster import Cluster, TwistedConnection
-from cassandra.io.asyncorereactor import AsyncoreConnection
-from cassandra.io.libevreactor import LibevConnection
-from cassandra.io.geventreactor import GeventConnection
-from cassandra.io.eventletreactor import EventletConnection
-from cassandra.io.asyncioreactor import AsyncioConnection
 
-supported_connection_classes = [AsyncoreConnection, LibevConnection, TwistedConnection]
+# from cassandra.io.libevreactor import LibevConnection
+supported_connection_classes = [TwistedConnection]
+from cassandra.io.geventreactor import GeventConnection
+# from cassandra.io.eventletreactor import EventletConnection
+from cassandra.io.asyncioreactor import AsyncioConnection
+try:
+    from cassandra.io.asyncorereactor import AsyncoreConnection
+    supported_connection_classes += [AsyncoreConnection]
+except ImportError:
+    pass
+
 # need to run them with specific configuration like `gevent.monkey.patch_all()` or under async functions
-unsupported_connection_classes = [GeventConnection, AsyncioConnection, EventletConnection]
+unsupported_connection_classes = [GeventConnection, AsyncioConnection]
 
 
 class ScyllaCloudConfigTests(TestCase):
@@ -54,6 +59,7 @@ class ScyllaCloudConfigTests(TestCase):
         self.ccm_cluster = use_cluster("sni_proxy", [1], start=False)
         config_data_yaml, config_path_yaml = self.start_cluster_with_proxy()
 
+        logging.info("test 1 node cluster")
         for config in [config_path_yaml, config_data_yaml]:
             for connection_class in supported_connection_classes:
                 logging.warning('testing with class: %s', connection_class.__name__)
@@ -72,6 +78,7 @@ class ScyllaCloudConfigTests(TestCase):
         self.ccm_cluster = use_cluster("sni_proxy", [3], start=False)
         config_data_yaml, config_path_yaml = self.start_cluster_with_proxy()
 
+        logging.info("test 3 node cluster")
         for config in [config_path_yaml, config_data_yaml]:
             for connection_class in supported_connection_classes:
                 logging.warning('testing with class: %s', connection_class.__name__)

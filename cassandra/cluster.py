@@ -101,7 +101,7 @@ except ImportError:
 
 try:
     from cassandra.io.eventletreactor import EventletConnection
-except ImportError:
+except (ImportError, AttributeError): # AttributeError was add for handling python 3.12 https://github.com/eventlet/eventlet/issues/812
     EventletConnection = None
 
 try:
@@ -115,9 +115,11 @@ if six.PY3:
 def _is_eventlet_monkey_patched():
     if 'eventlet.patcher' not in sys.modules:
         return False
-    import eventlet.patcher
-    return eventlet.patcher.is_monkey_patched('socket')
-
+    try:
+        import eventlet.patcher
+        return eventlet.patcher.is_monkey_patched('socket')
+    except (ImportError, AttributeError):  # AttributeError was add for handling python 3.12 https://github.com/eventlet/eventlet/issues/812
+        return False
 
 def _is_gevent_monkey_patched():
     if 'gevent.monkey' not in sys.modules:
@@ -137,7 +139,7 @@ else:
     try:
         from cassandra.io.libevreactor import LibevConnection as DefaultConnection  # NOQA
     except ImportError:
-        from cassandra.io.asyncorereactor import AsyncoreConnection as DefaultConnection  # NOQA
+        from cassandra.io.asyncioreactor import AsyncioConnection as DefaultConnection  # NOQA
 
 # Forces load of utf8 encoding module to avoid deadlock that occurs
 # if code that is being imported tries to import the module in a seperate
