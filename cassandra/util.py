@@ -1150,6 +1150,118 @@ class Date(object):
         except:
             # If we overflow datetime.[MIN|MAX]
             return str(self.days_from_epoch)
+        
+
+@total_ordering
+class Datetime(object):
+    '''
+    Idealized datetime: year, month, day, hour, minute, second, microsecond, and tzinfo
+
+    Offers wider year range than datetime.datetime. For Datetimess that cannot be represented
+    as a datetime.datetime (because datetime.MINYEAR, datetime.MAXYEAR), this type falls back
+    to printing milliseconds_from_epoch offset.
+    '''
+    
+    MICRO = 1000
+    MILLI = 1000 * MICRO
+    SECOND = 1000 * MILLI
+    MINUTE = 60
+    HOUR = 60 * MINUTE
+    DAY = 24 * HOUR
+
+    datetime_format = "%Y-%m-%d %H:%M:%S"
+
+    milliseconds_from_epoch = 0
+
+    def __init__(self, value):
+        """
+        Initializer value can be:
+
+        - number_type: milliseconds from epoch (1970, 1, 1). Can be negative.
+        - datetime.datetime: built-in datetime
+        """
+        if isinstance(value, (int, long, float)):
+            self.milliseconds_from_epoch = value
+        elif isinstance(value, datetime.datetime):
+            self._from_datetime(value)
+        elif isinstance(value, datetime.date):
+            self._from_timetuple(value.timetuple())
+        elif isinstance(value, Datetime):
+            self.milliseconds_from_epoch = value.milliseconds_from_epoch
+        else:
+            raise TypeError('Date arguments must be a whole number or datetime.datetime')
+
+    @property
+    def seconds(self):
+        """
+        Absolute seconds from epoch (can be negative)
+        """
+        return self.milliseconds_from_epoch // 1000
+     
+    @property
+    def days(self):
+        """
+        Absolute days from epoch (can be negative)
+        """
+        return self.seconds // Date.DAY
+    
+
+
+    def datetime(self):
+        """
+        Return a built-in datetime.datetime for Dates falling in the years [datetime.MINYEAR, datetime.MAXYEAR]
+
+        ValueError is raised for Dates outside this range.
+        """
+        try:
+            dt = utc_datetime_from_ms_timestamp(self.milliseconds_from_epoch)
+            return dt
+        except Exception:
+            raise ValueError("%r exceeds ranges for built-in datetime.datetime" % self)
+
+    def _from_timetuple(self, t):
+        self.milliseconds_from_epoch = calendar.timegm(t) * 1000
+
+    def _from_datetime(self, v):
+        self.milliseconds_from_epoch = calendar.timegm(v.timetuple()) * 1000 + v.microsecond // 1000
+
+    def __hash__(self):
+        return self.milliseconds_from_epoch
+
+    def __eq__(self, other):
+        if isinstance(other, Datetime):
+            return self.milliseconds_from_epoch == other.milliseconds_from_epoch
+
+        if isinstance(other, (int, long, float)):
+            return self.milliseconds_from_epoch == other
+
+        try:
+            return self.datetime() == other
+        except Exception:
+            return False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __lt__(self, other):
+        if not isinstance(other, Datetime):
+            return NotImplemented
+        return self.milliseconds_from_epoch < other.milliseconds_from_epoch
+
+    def __add__(self, other):
+        if isinstance(other, datetime.timedelta):
+            return Datetime(int(self.milliseconds_from_epoch + other.total_seconds() * 1000))
+        return self + other
+
+    def __repr__(self):
+        return "Datetime(%s)" % self.milliseconds_from_epoch
+
+    def __str__(self):
+        try:
+            dt = utc_datetime_from_ms_timestamp(self.milliseconds_from_epoch)
+            return "%04d-%02d-%02d %02d:%02d:%02d.%09d" % (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond)
+        except:
+            return str(self.milliseconds_from_epoch)
 
 import socket
 if hasattr(socket, 'inet_pton'):
