@@ -243,7 +243,9 @@ class Encoder(object):
         Converts any type into a CQL string, defaulting to ``cql_encode_object``
         if :attr:`~Encoder.mapping` does not contain an entry for the type.
         """
+        # print("CQL ENCODE ALL TYPES")
         encoded = self.mapping.get(type(val), self.cql_encode_object)(val)
+        # print(encoded)
         if as_text_type and not isinstance(encoded, six.text_type):
             return encoded.decode('utf-8')
         return encoded

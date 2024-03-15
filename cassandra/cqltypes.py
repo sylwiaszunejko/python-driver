@@ -306,6 +306,9 @@ class _CassandraType(object):
         for more information. This method differs in that if None or the empty
         string is passed in, None may be returned.
         """
+        # print("FROM BINARY")
+        # print(cls)
+        # print(byts)
         if byts is None:
             return None
         elif len(byts) == 0 and not cls.empty_binary_ok:
@@ -642,22 +645,32 @@ class DateType(_CassandraType):
 
     @staticmethod
     def deserialize(byts, protocol_version):
+        # print("DESERIALIZE DATE!!!")
+        # print(byts)
         timestamp = int64_unpack(byts) / 1000.0
+        # print("Timestamp: %s", timestamp)
         return util.Datetime(util.Datetime(util.DATETIME_EPOC) + datetime.timedelta(seconds=timestamp))
 
     @staticmethod
     def serialize(v, protocol_version):
+        # print("Serialize: %s", v)
         try:
             # v is Datetime
+            # timestamp_seconds = calendar.timegm(v.utctimetuple())
+            # timestamp = timestamp_seconds * 1e3 + getattr(v, 'microsecond', 0) / 1e3
+
             timestamp = v.milliseconds_from_epoch
         except AttributeError:
             try:
                 timestamp = util.Datetime(v).milliseconds_from_epoch
+                # timestamp = calendar.timegm(v.timetuple()) * 1e3
             except AttributeError:
                 # Ints and floats are valid timestamps too
                 if type(v) not in _number_types:
                     raise TypeError('DateType arguments must be a datetime, date, or timestamp')
                 timestamp = v
+
+        # print(int64_pack(long(timestamp)))
 
         return int64_pack(long(timestamp))
 

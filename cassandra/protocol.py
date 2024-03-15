@@ -740,9 +740,11 @@ class ResultMessage(_MessageType):
         self.kind = kind
 
     def recv(self, f, protocol_version, user_type_map, result_metadata):
+        # log.info(self.kind)
         if self.kind == RESULT_KIND_VOID:
             return
         elif self.kind == RESULT_KIND_ROWS:
+            # log.info("RESULT KIND ROWS")
             self.recv_results_rows(f, protocol_version, user_type_map, result_metadata)
         elif self.kind == RESULT_KIND_SET_KEYSPACE:
             self.new_keyspace = read_string(f)
@@ -755,19 +757,25 @@ class ResultMessage(_MessageType):
 
     @classmethod
     def recv_body(cls, f, protocol_version, protocol_features, user_type_map, result_metadata):
+        log.info("RECV BODY RESULT MESSAGE")
         kind = read_int(f)
         msg = cls(kind)
+        log.info(msg)
         msg.recv(f, protocol_version, user_type_map, result_metadata)
         return msg
 
     def recv_results_rows(self, f, protocol_version, user_type_map, result_metadata):
+        log.info("RECV RESULTS ROWS")
         self.recv_results_metadata(f, user_type_map)
         column_metadata = self.column_metadata or result_metadata
         rowcount = read_int(f)
         rows = [self.recv_row(f, len(column_metadata)) for _ in range(rowcount)]
+        # print("ROWS: %s", rows)
         self.column_names = [c[2] for c in column_metadata]
         self.column_types = [c[3] for c in column_metadata]
         try:
+            # for row in rows:
+            #     print("ROW: %s", row)
             self.parsed_rows = [
                 tuple(ctype.from_binary(val, protocol_version)
                       for ctype, val in zip(self.column_types, row))
@@ -776,8 +784,10 @@ class ResultMessage(_MessageType):
             for row in rows:
                 for i in range(len(row)):
                     try:
+                        log.info("RUN FROM BINARY")
                         self.column_types[i].from_binary(row[i], protocol_version)
                     except Exception as e:
+                        log.info("DRIVER EXCEPTION")
                         raise DriverException('Failed decoding result column "%s" of type %s: %s' % (self.column_names[i],
                                                                                                      self.column_types[i].cql_parameterized_type(),
                                                                                                      str(e)))
@@ -895,6 +905,7 @@ class ResultMessage(_MessageType):
 
     @staticmethod
     def recv_row(f, colcount):
+        # print("RECV ROW: %s", colcount)
         return [read_value(f) for _ in range(colcount)]
 
 
@@ -1177,6 +1188,7 @@ class _ProtocolHandler(object):
         :param decompressor: optional decompression function to inflate the body
         :return: a message decoded from the body and frame attributes
         """
+        log.info("DECODE MESSAGE")
         if (not ProtocolVersion.has_checksumming_support(protocol_version) and
                 flags & COMPRESSED_FLAG):
             if decompressor is None:
@@ -1209,6 +1221,7 @@ class _ProtocolHandler(object):
             log.warning("Unknown protocol flags set: %02x. May cause problems.", flags)
 
         msg_class = cls.message_types_by_opcode[opcode]
+        log.info("RUN RECV BODY")
         msg = msg_class.recv_body(body, protocol_version, protocol_features, user_type_map, result_metadata)
         msg.stream_id = stream_id
         msg.trace_id = trace_id
@@ -1249,6 +1262,7 @@ def cython_protocol_handler(colparser):
         """
         # type_codes = ResultMessage.type_codes.copy()
         code_to_type = dict((v, k) for k, v in ResultMessage.type_codes.items())
+        log.info("PODMIANKA")
         recv_results_rows = make_recv_results_rows(colparser)
 
     class CythonProtocolHandler(_ProtocolHandler):
@@ -1257,6 +1271,7 @@ def cython_protocol_handler(colparser):
         """
 
         my_opcodes = _ProtocolHandler.message_types_by_opcode.copy()
+        log.info("USE FAST")
         my_opcodes[FastResultMessage.opcode] = FastResultMessage
         message_types_by_opcode = my_opcodes
 
@@ -1455,6 +1470,7 @@ def read_error_code_map(f):
 
 def read_value(f):
     size = read_int(f)
+    # print("READ VALUE, size: %s", size)
     if size < 0:
         return None
     return f.read(size)

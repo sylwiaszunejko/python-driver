@@ -400,9 +400,12 @@ class SimpleStatement(Statement):
 
         See :class:`Statement` attributes for a description of the other parameters.
         """
+        # print("SimpleStatement %s", query_string)
         Statement.__init__(self, retry_policy, consistency_level, routing_key,
                            serial_consistency_level, fetch_size, keyspace, custom_payload, is_idempotent)
         self._query_string = query_string
+        # print("SimpleStatement2 %s", query_string)
+
 
     @property
     def query_string(self):
@@ -898,11 +901,14 @@ For example::
 
 
 def bind_params(query, params, encoder):
+    # print("BIND PARAMS")
     if six.PY2 and isinstance(query, six.text_type):
         query = query.encode('utf-8')
     if isinstance(params, dict):
+        # print("BIND PARAMS 1")
         return query % dict((k, encoder.cql_encode_all_types(v)) for k, v in six.iteritems(params))
     else:
+        # print("BIND PARAMS 2")
         return query % tuple(encoder.cql_encode_all_types(v) for v in params)
 
 

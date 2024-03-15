@@ -24,17 +24,26 @@ def create_table_with_all_types(table_name, session, N):
         alpha_type_list.append("{0} {1}".format(chr(start_index + i), datatype))
         col_names.append(chr(start_index + i))
 
+    # print("CREATE TABLE {0} ({1})".format(
+                        # table_name, ', '.join(alpha_type_list)))
     session.execute("CREATE TABLE {0} ({1})".format(
                         table_name, ', '.join(alpha_type_list)), timeout=120)
 
     # create the input
 
     for key in range(N):
+        # print("_-------------------_")
+        # print(key)
         params = get_all_primitive_params(key)
+        # print(params)
 
         # insert into table as a simple statement
         columns_string = ', '.join(col_names)
+        # print(columns_string)
         placeholders = ', '.join(["%s"] * len(col_names))
+        # print(placeholders)
+        # print("INSERT INTO {0} ({1}) VALUES ({2})".format(
+        #                     table_name, columns_string, placeholders))
         session.execute("INSERT INTO {0} ({1}) VALUES ({2})".format(
                             table_name, columns_string, placeholders), params, timeout=120)
     return col_names

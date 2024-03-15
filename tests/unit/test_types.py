@@ -195,6 +195,7 @@ class TypeTests(unittest.TestCase):
 
     def test_datetype(self):
         now_time_seconds = time.time()
+        print("NOW TIME seconds: %s", now_time_seconds)
         now_datetime = util.Datetime(datetime.datetime.utcfromtimestamp(now_time_seconds))
 
         # Cassandra timestamps in millis

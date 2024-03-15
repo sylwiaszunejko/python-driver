@@ -114,12 +114,17 @@ class CustomProtocolHandlerTest(unittest.TestCase):
 
         # verify data
         params = get_all_primitive_params(0)
+        # print(params)
         results = session.execute("SELECT {0} FROM alltypes WHERE primkey=0".format(columns_string))[0]
+        # print(results)
         for expected, actual in zip(params, results):
+            # print("ACT: %s, EXP: %s", actual, expected)
             self.assertEqual(actual, expected)
         # Ensure we have covered the various primitive types
         self.assertEqual(len(CustomResultMessageTracked.checked_rev_row_set), len(PRIMITIVE_DATATYPES)-1)
         cluster.shutdown()
+
+        # self.assertEqual(1, 2)
 
     @unittest.expectedFailure
     @requirecassandra

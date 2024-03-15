@@ -2726,6 +2726,8 @@ class Session(object):
         on a DSE cluster.
         """
 
+        # print("EXECUTE %s", query)
+
         return self.execute_async(query, parameters, trace, custom_payload, timeout, execution_profile, paging_state, host, execute_as).result()
 
     def execute_async(self, query, parameters=None, trace=False, custom_payload=None,
@@ -2765,6 +2767,9 @@ class Session(object):
             ...     log.exception("Operation failed:")
 
         """
+        # if isinstance(query, SimpleStatement):
+        #     print("EXECUTE ASYNC %s", query.query_string)
+        #     print("PARAMS: %s", parameters)
         custom_payload = custom_payload if custom_payload else {}
         if execute_as:
             custom_payload[_proxy_execute_key] = six.b(execute_as)
@@ -2971,6 +2976,7 @@ class Session(object):
 
         if isinstance(query, six.string_types):
             query = SimpleStatement(query)
+            # print("make Simple Stmt: %s", query.query_string)
         elif isinstance(query, PreparedStatement):
             query = query.bind(parameters)
 
@@ -3027,12 +3033,15 @@ class Session(object):
         if isinstance(query, SimpleStatement):
             query_string = query.query_string
             statement_keyspace = query.keyspace if ProtocolVersion.uses_keyspace_flag(self._protocol_version) else None
+            # print("Query string1 %s", query_string)
             if parameters:
                 query_string = bind_params(query_string, parameters, self.encoder)
+            # print("Query string2 %s", query_string)
             message = QueryMessage(
                 query_string, cl, serial_cl,
                 fetch_size, paging_state, timestamp,
                 continuous_paging_options, statement_keyspace)
+            # print("Message done %s", message.query)
         elif isinstance(query, BoundStatement):
             prepared_statement = query.prepared_statement
             message = ExecuteMessage(
@@ -3063,6 +3072,7 @@ class Session(object):
         message.allow_beta_protocol_version = self.cluster.allow_beta_protocol_version
 
         spec_exec_plan = spec_exec_policy.new_plan(query.keyspace or self.keyspace, query) if query.is_idempotent and spec_exec_policy else None
+        # print("RETURN RESPONSE FUTURE %s, %s", message, query)
         return ResponseFuture(
             self, message, query, timeout, metrics=self._metrics,
             prepared_statement=prepared_statement, retry_policy=retry_policy, row_factory=row_factory,
