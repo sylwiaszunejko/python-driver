@@ -1169,9 +1169,8 @@ class Datetime(object):
     HOUR = 60 * MINUTE
     DAY = 24 * HOUR
 
-    datetime_format = "%Y-%m-%d %H:%M:%S"
-
     milliseconds_from_epoch = 0
+    tzinfo = None
 
     def __init__(self, value):
         """
@@ -1188,6 +1187,7 @@ class Datetime(object):
             self._from_timetuple(value.timetuple())
         elif isinstance(value, Datetime):
             self.milliseconds_from_epoch = value.milliseconds_from_epoch
+            self.tzinfo = value.tzinfo
         else:
             raise TypeError('Date arguments must be a whole number or datetime.datetime')
 
@@ -1204,8 +1204,6 @@ class Datetime(object):
         Absolute days from epoch (can be negative)
         """
         return self.seconds // Date.DAY
-    
-
 
     def datetime(self):
         """
@@ -1214,16 +1212,26 @@ class Datetime(object):
         ValueError is raised for Dates outside this range.
         """
         try:
-            dt = utc_datetime_from_ms_timestamp(self.milliseconds_from_epoch)
+            dt = datetime.datetime(1970, 1, 1, tzinfo=self.tzinfo) + datetime.timedelta(milliseconds=self.milliseconds_from_epoch)
             return dt
         except Exception:
             raise ValueError("%r exceeds ranges for built-in datetime.datetime" % self)
+        
+    def utctimetuple(self):
+        return self.datetime().utctimetuple()
+    
+    def timetuple(self):
+        return self.datetime().timetuple()
+
+    def isoformat(self, sep='T', timespec='auto'):
+        return self.datetime().isoformat(sep, timespec)
 
     def _from_timetuple(self, t):
         self.milliseconds_from_epoch = calendar.timegm(t) * 1000
 
     def _from_datetime(self, v):
         self.milliseconds_from_epoch = calendar.timegm(v.timetuple()) * 1000 + v.microsecond // 1000
+        self.tzinfo = v.tzinfo
 
     def __hash__(self):
         return self.milliseconds_from_epoch
@@ -1252,13 +1260,18 @@ class Datetime(object):
         if isinstance(other, datetime.timedelta):
             return Datetime(int(self.milliseconds_from_epoch + other.total_seconds() * 1000))
         return self + other
+    
+    def __sub__(self, other):
+        if isinstance(other, Datetime):
+            return datetime.timedelta(milliseconds=self.milliseconds_from_epoch - other.milliseconds_from_epoch)
+        return self - other
 
     def __repr__(self):
         return "Datetime(%s)" % self.milliseconds_from_epoch
 
     def __str__(self):
         try:
-            dt = utc_datetime_from_ms_timestamp(self.milliseconds_from_epoch)
+            dt = datetime.datetime(1970, 1, 1, tzinfo=self.tzinfo) + datetime.timedelta(milliseconds=self.milliseconds_from_epoch)
             return "%04d-%02d-%02d %02d:%02d:%02d.%09d" % (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond)
         except:
             return str(self.milliseconds_from_epoch)
