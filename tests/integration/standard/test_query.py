@@ -87,6 +87,17 @@ class QueryTests(BasicSharedKeyspaceUnitTestCase):
         for event in trace.events:
             str(event)
 
+    def test_datetime_outside_range(self):
+        """ Test to validate if driver supports datetime outside datetime.[MIN|MAX]YEAR range """
+        self.session.execute("CREATE TABLE {0}.{1} (k int PRIMARY KEY, v date)".format(self.keyspace_name,self.function_table_name))
+
+        ss = SimpleStatement("INSERT INTO {0}.{1} (k, v) VALUES (1, 1073741824)".format(self.keyspace_name, self.function_table_name))
+        self.session.execute(ss)
+        self.session.execute("SELECT totimestamp(v) FROM {0}.{1}".format(self.keyspace_name, self.function_table_name))
+
+        ss = SimpleStatement("INSERT INTO {0}.{1} (k, v) VALUES (1, 1610612736)".format(self.keyspace_name, self.function_table_name))
+        self.session.execute(ss)
+        self.session.execute("SELECT totimestamp(v) FROM {0}.{1}".format(self.keyspace_name, self.function_table_name))
 
     def test_trace_id_to_resultset(self):
 
