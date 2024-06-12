@@ -32,6 +32,7 @@ from cassandra.datastax.insights.registry import insights_registry
 from cassandra.datastax.insights.serializers import initialize_registry
 from cassandra.datastax.insights.util import namespace
 from cassandra.policies import (
+    RackAwareRoundRobinPolicy,
     RoundRobinPolicy,
     LoadBalancingPolicy,
     DCAwareRoundRobinPolicy,
@@ -135,8 +136,9 @@ class TestConfigAsDict(unittest.TestCase):
              'loadBalancing': {'namespace': 'cassandra.policies',
                                'options': {'child_policy': {'namespace': 'cassandra.policies',
                                                             'options': {'local_dc': '',
+                                                                        'local_rack': '',
                                                                         'used_hosts_per_remote_dc': 0},
-                                                            'type': 'DCAwareRoundRobinPolicy'},
+                                                            'type': 'RackAwareRoundRobinPolicy'},
                                            'shuffle_replicas': False},
                                'type': 'TokenAwarePolicy'},
              'readTimeout': 10.0,
@@ -157,8 +159,9 @@ class TestConfigAsDict(unittest.TestCase):
              'loadBalancing': {'namespace': 'cassandra.policies',
                                'options': {'child_policy': {'namespace': 'cassandra.policies',
                                                             'options': {'local_dc': '',
+                                                                        'local_rack': '',
                                                                         'used_hosts_per_remote_dc': 0},
-                                                            'type': 'DCAwareRoundRobinPolicy'},
+                                                            'type': 'RackAwareRoundRobinPolicy'},
                                            'shuffle_replicas': False},
                                'type': 'TokenAwarePolicy'},
              'readTimeout': 30.0,
@@ -182,8 +185,9 @@ class TestConfigAsDict(unittest.TestCase):
                                'options': {'child_policy': {'namespace': 'cassandra.policies',
                                                             'options': {'child_policy': {'namespace': 'cassandra.policies',
                                                                                          'options': {'local_dc': '',
+                                                                                                     'local_rack': '',
                                                                                                      'used_hosts_per_remote_dc': 0},
-                                                                                         'type': 'DCAwareRoundRobinPolicy'},
+                                                                                         'type': 'RackAwareRoundRobinPolicy'},
                                                                         'shuffle_replicas': False},
                                                             'type': 'TokenAwarePolicy'}},
                                'type': 'DefaultLoadBalancingPolicy'},
@@ -212,6 +216,22 @@ class TestConfigAsDict(unittest.TestCase):
             {'namespace': 'cassandra.policies',
              'options': {'local_dc': 'fake_local_dc', 'used_hosts_per_remote_dc': 15},
              'type': 'DCAwareRoundRobinPolicy'}
+        )
+
+    def test_rack_aware_round_robin_policy(self):
+        self.assertEqual(
+            insights_registry.serialize(RackAwareRoundRobinPolicy()),
+            {'namespace': 'cassandra.policies',
+             'options': {'local_dc': '', 'local_rack': '', 'used_hosts_per_remote_dc': 0},
+             'type': 'RackAwareRoundRobinPolicy'}
+        )
+        self.assertEqual(
+            insights_registry.serialize(RackAwareRoundRobinPolicy(local_dc='fake_local_dc',
+                                                                  local_rack='fake_local_rack',
+                                                                used_hosts_per_remote_dc=15)),
+            {'namespace': 'cassandra.policies',
+             'options': {'local_dc': 'fake_local_dc', 'local_rack': 'fake_local_rack', 'used_hosts_per_remote_dc': 15},
+             'type': 'RackAwareRoundRobinPolicy'}
         )
 
     def test_token_aware_policy(self):

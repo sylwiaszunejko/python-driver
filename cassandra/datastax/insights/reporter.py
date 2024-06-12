@@ -130,6 +130,7 @@ class MonitorReporter(Thread):
             for host in self._session.hosts
         )
         host_distances_dict = {
+            'local_rack': host_distances_counter[HostDistance.LOCAL_RACK],
             'local': host_distances_counter[HostDistance.LOCAL],
             'remote': host_distances_counter[HostDistance.REMOTE],
             'ignored': host_distances_counter[HostDistance.IGNORED]
@@ -176,7 +177,8 @@ class MonitorReporter(Thread):
                 'contactPoints': self._session.cluster._endpoint_map_for_insights,
                 'dataCenters': list(set(h.datacenter for h in self._session.cluster.metadata.all_hosts()
                                         if (h.datacenter and
-                                            self._session.cluster.profile_manager.distance(h) == HostDistance.LOCAL))),
+                                            (self._session.cluster.profile_manager.distance(h) == HostDistance.LOCAL
+                                             or self._session.cluster.profile_manager.distance(h) == HostDistance.LOCAL_RACK)))),
                 'initialControlConnection': cc._connection.host if cc._connection else None,
                 'protocolVersion': self._session.cluster.protocol_version,
                 'localAddress': local_ipaddr,

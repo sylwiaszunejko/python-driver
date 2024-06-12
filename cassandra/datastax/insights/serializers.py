@@ -38,6 +38,7 @@ def initialize_registry(insights_registry):
         RoundRobinPolicy,
         DCAwareRoundRobinPolicy,
         TokenAwarePolicy,
+        RackAwareRoundRobinPolicy,
         WhiteListRoundRobinPolicy,
         HostFilterPolicy,
         ConstantReconnectionPolicy,
@@ -63,6 +64,15 @@ def initialize_registry(insights_registry):
         return {'type': policy.__class__.__name__,
                 'namespace': namespace(policy.__class__),
                 'options': {'local_dc': policy.local_dc,
+                            'used_hosts_per_remote_dc': policy.used_hosts_per_remote_dc}
+                }
+
+    @insights_registry.register_serializer_for(RackAwareRoundRobinPolicy)
+    def rack_aware_round_robin_policy_insights_serializer(policy):
+        return {'type': policy.__class__.__name__,
+                'namespace': namespace(policy.__class__),
+                'options': {'local_dc': policy.local_dc,
+                            'local_rack': policy.local_rack,
                             'used_hosts_per_remote_dc': policy.used_hosts_per_remote_dc}
                 }
 

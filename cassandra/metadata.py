@@ -3417,7 +3417,7 @@ def group_keys_by_replica(session, keyspace, table, keys):
     :class:`~.NO_VALID_REPLICA`
 
     Example usage::
-        
+
         >>> result = group_keys_by_replica(
         ...     session, "system", "peers",
         ...     (("127.0.0.1", ), ("127.0.0.2", )))
@@ -3440,7 +3440,7 @@ def group_keys_by_replica(session, keyspace, table, keys):
         all_replicas = cluster.metadata.get_replicas(keyspace, routing_key)
         # First check if there are local replicas
         valid_replicas = [host for host in all_replicas if
-                          host.is_up and distance(host) == HostDistance.LOCAL]
+                          host.is_up and (distance(host) == HostDistance.LOCAL or distance(host) == HostDistance.LOCAL_RACK)]
         if not valid_replicas:
             valid_replicas = [host for host in all_replicas if host.is_up]
 

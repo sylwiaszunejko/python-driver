@@ -229,7 +229,7 @@ class DefaultEndPointFactory(EndPointFactory):
     port = None
     """
     If no port is discovered in the row, this is the default port
-    used for endpoint creation. 
+    used for endpoint creation.
     """
 
     def __init__(self, port=None):
@@ -873,7 +873,9 @@ class Connection(object):
         """
         start = time.time()
         kwargs['connect_timeout'] = timeout
+        print("conn factory: ", endpoint)
         conn = cls(endpoint, *args, **kwargs)
+        print("conn factory2: ", endpoint)
         if host_conn is not None:
             host_conn._pending_connections.append(conn)
             if host_conn.is_shutdown:
@@ -1318,6 +1320,7 @@ class Connection(object):
 
     @defunct_on_error
     def _send_options_message(self):
+        print("SEND options message")
         log.debug("Sending initial options message for new connection (%s) to %s", id(self), self.endpoint)
         self.send_msg(OptionsMessage(), self.get_request_id(), self._handle_options_response)
 

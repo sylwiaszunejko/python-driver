@@ -101,7 +101,7 @@ Initializing cluster with profiles
     Row(rpc_address='127.0.0.2')
     Row(rpc_address='127.0.0.1')
 
-Note that, even when custom profiles are injected, the default ``TokenAwarePolicy(DCAwareRoundRobinPolicy())`` is still
+Note that, even when custom profiles are injected, the default ``TokenAwarePolicy(RackAwareRoundRobinPolicy())`` is still
 present. To override the default, specify a policy with the :data:`~.cluster.EXEC_PROFILE_DEFAULT` key.
 
 .. code:: python

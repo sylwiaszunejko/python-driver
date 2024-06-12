@@ -67,7 +67,7 @@ from cassandra.protocol import (QueryMessage, ResultMessage,
                                 RESULT_KIND_SCHEMA_CHANGE, ProtocolHandler,
                                 RESULT_KIND_VOID, ProtocolException)
 from cassandra.metadata import Metadata, protect_name, murmur3, _NodeInfo
-from cassandra.policies import (TokenAwarePolicy, DCAwareRoundRobinPolicy, SimpleConvictionPolicy,
+from cassandra.policies import (RackAwareRoundRobinPolicy, TokenAwarePolicy, DCAwareRoundRobinPolicy, SimpleConvictionPolicy,
                                 ExponentialReconnectionPolicy, HostDistance,
                                 RetryPolicy, IdentityTranslator, NoSpeculativeExecutionPlan,
                                 NoSpeculativeExecutionPolicy, DefaultLoadBalancingPolicy,
@@ -239,8 +239,8 @@ atexit.register(_shutdown_clusters)
 
 def default_lbp_factory():
     if murmur3 is not None:
-        return TokenAwarePolicy(DCAwareRoundRobinPolicy())
-    return DCAwareRoundRobinPolicy()
+        return TokenAwarePolicy(RackAwareRoundRobinPolicy())
+    return RackAwareRoundRobinPolicy()
 
 
 class ContinuousPagingOptions(object):
@@ -320,7 +320,7 @@ class ExecutionProfile(object):
 
     Used in determining host distance for establishing connections, and routing requests.
 
-    Defaults to ``TokenAwarePolicy(DCAwareRoundRobinPolicy())`` if not specified
+    Defaults to ``TokenAwarePolicy(RackAwareRoundRobinPolicy())`` if not specified
     """
 
     retry_policy = None
@@ -496,7 +496,8 @@ class ProfileManager(object):
 
     def distance(self, host):
         distances = set(p.load_balancing_policy.distance(host) for p in self.profiles.values())
-        return HostDistance.LOCAL if HostDistance.LOCAL in distances else \
+        return HostDistance.LOCAL_RACK if HostDistance.LOCAL_RACK in distances else \
+            HostDistance.LOCAL if HostDistance.LOCAL in distances else \
             HostDistance.REMOTE if HostDistance.REMOTE in distances else \
             HostDistance.IGNORED
 
@@ -622,6 +623,11 @@ class Cluster(object):
     also be required to also explicitly specify a load-balancing policy. This
     change will help prevent cases where users had hard-to-debug issues
     surrounding unintuitive default load-balancing policy behavior.
+
+    Note: When using :class:`.RackAwareLoadBalancingPolicy` with no explicit
+    local_dc and local_rack set (as is the default), the DC is chosen from an arbitrary
+    host in contact_points. In this case, contact_points should contain
+    only nodes from a single, local DC.
     """
     # tracks if contact_points was set explicitly or with default values
     _contact_points_explicit = None
@@ -719,12 +725,12 @@ class Cluster(object):
 
         .. versionchanged:: 2.6.0
 
-        Defaults to :class:`~.TokenAwarePolicy` (:class:`~.DCAwareRoundRobinPolicy`).
-        when using CPython (where the murmur3 extension is available). :class:`~.DCAwareRoundRobinPolicy`
+        Defaults to :class:`~.TokenAwarePolicy` (:class:`~.RackAwareRoundRobinPolicy`).
+        when using CPython (where the murmur3 extension is available). :class:`~.RackAwareRoundRobinPolicy`
         otherwise. Default local DC will be chosen from contact points.
 
-        **Please see** :class:`~.DCAwareRoundRobinPolicy` **for a discussion on default behavior with respect to
-        DC locality and remote nodes.**
+        **Please see** :class:`~.RackAwareRoundRobinPolicy` **for a discussion on default behavior with respect to
+        DC and rack locality and remote nodes.**
         """
         return self._load_balancing_policy
 
@@ -1017,7 +1023,7 @@ class Cluster(object):
     cloud = None
     """
     A dict of the cloud configuration. Example::
-        
+
         {
             # path to the secure connect bundle
             'secure_connect_bundle': '/path/to/secure-connect-dbname.zip',
@@ -1373,21 +1379,25 @@ class Cluster(object):
         self._user_types = defaultdict(dict)
 
         self._min_requests_per_connection = {
+            HostDistance.LOCAL_RACK: DEFAULT_MIN_REQUESTS,
             HostDistance.LOCAL: DEFAULT_MIN_REQUESTS,
             HostDistance.REMOTE: DEFAULT_MIN_REQUESTS
         }
 
         self._max_requests_per_connection = {
+            HostDistance.LOCAL_RACK: DEFAULT_MAX_REQUESTS,
             HostDistance.LOCAL: DEFAULT_MAX_REQUESTS,
             HostDistance.REMOTE: DEFAULT_MAX_REQUESTS
         }
 
         self._core_connections_per_host = {
+            HostDistance.LOCAL_RACK: DEFAULT_MIN_CONNECTIONS_PER_LOCAL_HOST,
             HostDistance.LOCAL: DEFAULT_MIN_CONNECTIONS_PER_LOCAL_HOST,
             HostDistance.REMOTE: DEFAULT_MIN_CONNECTIONS_PER_REMOTE_HOST
         }
 
         self._max_connections_per_host = {
+            HostDistance.LOCAL_RACK: DEFAULT_MAX_CONNECTIONS_PER_LOCAL_HOST,
             HostDistance.LOCAL: DEFAULT_MAX_CONNECTIONS_PER_LOCAL_HOST,
             HostDistance.REMOTE: DEFAULT_MAX_CONNECTIONS_PER_REMOTE_HOST
         }
@@ -1767,7 +1777,7 @@ class Cluster(object):
                           self.contact_points, self.protocol_version)
                 self.connection_class.initialize_reactor()
                 _register_cluster_shutdown(self)
-                
+
                 self._add_resolved_hosts()
 
                 try:
@@ -3615,8 +3625,9 @@ class ControlConnection(object):
         if old:
             log.debug("[control connection] Closing old connection %r, replacing with %r", old, conn)
             old.close()
-    
+
     def _connect_host_in_lbp(self):
+        print("_Connect host in lbp")
         errors = {}
         lbp = (
             self._cluster.load_balancing_policy
@@ -3625,6 +3636,7 @@ class ControlConnection(object):
         )
 
         for host in lbp.make_query_plan():
+            print("Host in lbp: ", host)
             try:
                 return (self._try_connect(host), None)
             except ConnectionException as exc:
@@ -3636,7 +3648,7 @@ class ControlConnection(object):
                 log.warning("[control connection] Error connecting to %s:", host, exc_info=True)
             if self._is_shutdown:
                 raise DriverException("[control connection] Reconnection in progress during shutdown")
-        
+
         return (None, errors)
 
     def _reconnect_internal(self):
@@ -3651,7 +3663,7 @@ class ControlConnection(object):
         (conn, _) = self._connect_host_in_lbp()
         if conn is not None:
             return conn
-        
+
         # Try to re-resolve hostnames as a fallback when all hosts are unreachable
         self._cluster._resolve_hostnames()
 
@@ -3660,7 +3672,7 @@ class ControlConnection(object):
         (conn, errors) = self._connect_host_in_lbp()
         if conn is not None:
             return conn
-        
+
         raise NoHostAvailable("Unable to connect to any servers", errors)
 
     def _try_connect(self, host):
@@ -3696,7 +3708,7 @@ class ControlConnection(object):
         # If sharding information is available, it's a ScyllaDB cluster, so do not use peers_v2 table.
         if connection.features.sharding_info is not None:
             self._uses_peers_v2 = False
-        
+
         self._tablets_routing_v1 = connection.features.tablets_routing_v1
 
         # use weak references in both directions

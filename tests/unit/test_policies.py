@@ -26,7 +26,7 @@ from threading import Thread
 from cassandra import ConsistencyLevel
 from cassandra.cluster import Cluster, ControlConnection
 from cassandra.metadata import Metadata
-from cassandra.policies import (RoundRobinPolicy, WhiteListRoundRobinPolicy, DCAwareRoundRobinPolicy,
+from cassandra.policies import (RackAwareRoundRobinPolicy, RoundRobinPolicy, WhiteListRoundRobinPolicy, DCAwareRoundRobinPolicy,
                                 TokenAwarePolicy, SimpleConvictionPolicy,
                                 HostDistance, ExponentialReconnectionPolicy,
                                 RetryPolicy, WriteType,
@@ -519,6 +519,382 @@ class DCAwareRoundRobinPolicyTest(unittest.TestCase):
         self.assertFalse(policy.local_dc)
         policy.on_add(host_remote)
         self.assertFalse(policy.local_dc)
+
+class RackAwareRoundRobinPolicyTest(unittest.TestCase):
+
+    def test_no_remote(self):
+        hosts = []
+        for i in range(2):
+            h = Host(DefaultEndPoint(i), SimpleConvictionPolicy)
+            h.set_location_info("dc1", "rack2")
+            hosts.append(h)
+        for i in range(2):
+            h = Host(DefaultEndPoint(i), SimpleConvictionPolicy)
+            h.set_location_info("dc1", "rack1")
+            hosts.append(h)
+
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1")
+        policy.populate(None, hosts)
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(sorted(qplan), sorted(hosts))
+
+    def test_with_remotes(self):
+        hosts = [Host(DefaultEndPoint(i), SimpleConvictionPolicy) for i in range(6)]
+        for h in hosts[:2]:
+            h.set_location_info("dc1", "rack1")
+        for h in hosts[2:4]:
+            h.set_location_info("dc1", "rack2")
+        for h in hosts[4:]:
+            h.set_location_info("dc2", "rack1")
+
+        local_rack_hosts = set(h for h in hosts if h.datacenter == "dc1" and h.rack == "rack1")
+        local_hosts = set(h for h in hosts if h.datacenter == "dc1" and h.rack != "rack1")
+        remote_hosts = set(h for h in hosts if h.datacenter != "dc1")
+
+        # allow all of the remote hosts to be used
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=2)
+        policy.populate(Mock(), hosts)
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(set(qplan[:2]), local_rack_hosts)
+        self.assertEqual(set(qplan[2:4]), local_hosts)
+        self.assertEqual(set(qplan[4:]), remote_hosts)
+
+        # allow only one of the remote hosts to be used
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=1)
+        policy.populate(Mock(), hosts)
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(set(qplan[:2]), local_rack_hosts)
+        self.assertEqual(set(qplan[2:4]), local_hosts)
+
+        used_remotes = set(qplan[4:])
+        self.assertEqual(1, len(used_remotes))
+        self.assertIn(qplan[4], remote_hosts)
+
+        # allow no remote hosts to be used
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=0)
+        policy.populate(Mock(), hosts)
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(4, len(qplan))
+        self.assertEqual(set(qplan[:2]), local_rack_hosts)
+        self.assertEqual(set(qplan[2:4]), local_hosts)
+
+    def test_get_distance(self):
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=0)
+
+        # same dc, same rack
+        host = Host(DefaultEndPoint("ip1"), SimpleConvictionPolicy)
+        host.set_location_info("dc1", "rack1")
+        policy.populate(Mock(), [host])
+
+        self.assertEqual(policy.distance(host), HostDistance.LOCAL_RACK)
+
+        # same dc different rack
+        host = Host(DefaultEndPoint("ip1"), SimpleConvictionPolicy)
+        host.set_location_info("dc1", "rack2")
+        policy.populate(Mock(), [host])
+
+        self.assertEqual(policy.distance(host), HostDistance.LOCAL)
+
+        # used_hosts_per_remote_dc is set to 0, so ignore it
+        remote_host = Host(DefaultEndPoint("ip2"), SimpleConvictionPolicy)
+        remote_host.set_location_info("dc2", "rack1")
+        self.assertEqual(policy.distance(remote_host), HostDistance.IGNORED)
+
+        # dc2 isn't registered in the policy's live_hosts dict
+        policy.used_hosts_per_remote_dc = 1
+        self.assertEqual(policy.distance(remote_host), HostDistance.IGNORED)
+
+        # make sure the policy has both dcs registered
+        policy.populate(Mock(), [host, remote_host])
+        self.assertEqual(policy.distance(remote_host), HostDistance.REMOTE)
+
+        # since used_hosts_per_remote_dc is set to 1, only the first
+        # remote host in dc2 will be REMOTE, the rest are IGNORED
+        second_remote_host = Host(DefaultEndPoint("ip3"), SimpleConvictionPolicy)
+        second_remote_host.set_location_info("dc2", "rack1")
+        policy.populate(Mock(), [host, remote_host, second_remote_host])
+        distances = set([policy.distance(remote_host), policy.distance(second_remote_host)])
+        self.assertEqual(distances, set([HostDistance.REMOTE, HostDistance.IGNORED]))
+
+    def test_status_updates(self):
+        hosts = [Host(DefaultEndPoint(i), SimpleConvictionPolicy) for i in range(5)]
+        for h in hosts[:2]:
+            h.set_location_info("dc1", "rack1")
+        for h in hosts[2:4]:
+            h.set_location_info("dc1", "rack2")
+        for h in hosts[4:]:
+            h.set_location_info("dc2", "rack1")
+
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=1)
+        policy.populate(Mock(), hosts)
+        policy.on_down(hosts[0])
+        policy.on_remove(hosts[2])
+
+        new_local_host = Host(DefaultEndPoint(5), SimpleConvictionPolicy)
+        new_local_host.set_location_info("dc1", "rack1")
+        policy.on_up(new_local_host)
+
+        new_remote_host = Host(DefaultEndPoint(6), SimpleConvictionPolicy)
+        new_remote_host.set_location_info("dc9000", "rack1")
+        policy.on_add(new_remote_host)
+
+        # we now have three local hosts and two remote hosts in separate dcs
+        qplan = list(policy.make_query_plan())
+        print(list(qplan))
+        print(hosts)
+        self.assertEqual(set(qplan[:3]), set([hosts[1], new_local_host, hosts[3]]))
+        self.assertEqual(set(qplan[3:]), set([hosts[4], new_remote_host]))
+
+        # since we have hosts in dc9000, the distance shouldn't be IGNORED
+        self.assertEqual(policy.distance(new_remote_host), HostDistance.REMOTE)
+
+        policy.on_down(new_local_host)
+        policy.on_down(hosts[1])
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(set(qplan), set([hosts[3], hosts[4],  new_remote_host]))
+
+        policy.on_down(new_remote_host)
+        policy.on_down(hosts[3])
+        policy.on_down(hosts[4])
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(qplan, [])
+
+    def test_modification_during_generation(self):
+        hosts = [Host(DefaultEndPoint(i), SimpleConvictionPolicy) for i in range(4)]
+        for h in hosts[:2]:
+            h.set_location_info("dc1", "rack1")
+        for h in hosts[2:]:
+            h.set_location_info("dc2", "rack1")
+
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=3)
+        policy.populate(Mock(), hosts)
+
+        # The general concept here is to change thee internal state of the
+        # policy during plan generation. In this case we use a grey-box
+        # approach that changes specific things during known phases of the
+        # generator.
+
+        new_host = Host(DefaultEndPoint(4), SimpleConvictionPolicy)
+        new_host.set_location_info("dc1", "rack1")
+
+        # new local before iteration
+        plan = policy.make_query_plan()
+        policy.on_up(new_host)
+        # local list is not bound yet, so we get to see that one
+        self.assertEqual(len(list(plan)), 3 + 2)
+
+        # remove local before iteration
+        plan = policy.make_query_plan()
+        policy.on_down(new_host)
+        # local list is not bound yet, so we don't see it
+        self.assertEqual(len(list(plan)), 2 + 2)
+
+        # new local after starting iteration
+        plan = policy.make_query_plan()
+        next(plan)
+        policy.on_up(new_host)
+        # local list was is bound, and one consumed, so we only see the other original
+        self.assertEqual(len(list(plan)), 1 + 2)
+
+        # remove local after traversing available
+        plan = policy.make_query_plan()
+        for _ in range(3):
+            next(plan)
+        policy.on_down(new_host)
+        # we should be past the local list
+        self.assertEqual(len(list(plan)), 0 + 2)
+
+        # REMOTES CHANGE
+        new_host.set_location_info("dc2", "rack1")
+
+        # new remote after traversing local, but not starting remote
+        plan = policy.make_query_plan()
+        for _ in range(2):
+            next(plan)
+        policy.on_up(new_host)
+        # list is updated before we get to it
+        self.assertEqual(len(list(plan)), 0 + 3)
+
+        # remove remote after traversing local, but not starting remote
+        plan = policy.make_query_plan()
+        for _ in range(2):
+            next(plan)
+        policy.on_down(new_host)
+        # list is updated before we get to it
+        self.assertEqual(len(list(plan)), 0 + 2)
+
+        # new remote after traversing local, and starting remote
+        plan = policy.make_query_plan()
+        for _ in range(3):
+            next(plan)
+        policy.on_up(new_host)
+        # slice is already made, and we've consumed one
+        self.assertEqual(len(list(plan)), 0 + 1)
+
+        # remove remote after traversing local, and starting remote
+        plan = policy.make_query_plan()
+        for _ in range(3):
+            next(plan)
+        policy.on_down(new_host)
+        # slice is created with all present, and we've consumed one
+        self.assertEqual(len(list(plan)), 0 + 2)
+
+        # local DC disappears after finishing it, but not starting remote
+        plan = policy.make_query_plan()
+        for _ in range(2):
+            next(plan)
+        policy.on_down(hosts[0])
+        policy.on_down(hosts[1])
+        # dict traversal starts as normal
+        self.assertEqual(len(list(plan)), 0 + 2)
+        policy.on_up(hosts[0])
+        policy.on_up(hosts[1])
+
+        # PYTHON-297 addresses the following cases, where DCs come and go
+        # during generation
+        # local DC disappears after finishing it, and starting remote
+        plan = policy.make_query_plan()
+        for _ in range(3):
+            next(plan)
+        policy.on_down(hosts[0])
+        policy.on_down(hosts[1])
+        # dict traversal has begun and consumed one
+        self.assertEqual(len(list(plan)), 0 + 1)
+        policy.on_up(hosts[0])
+        policy.on_up(hosts[1])
+
+        # remote DC disappears after finishing local, but not starting remote
+        plan = policy.make_query_plan()
+        for _ in range(2):
+            next(plan)
+        policy.on_down(hosts[2])
+        policy.on_down(hosts[3])
+        # nothing left
+        self.assertEqual(len(list(plan)), 0 + 0)
+        policy.on_up(hosts[2])
+        policy.on_up(hosts[3])
+
+        # remote DC disappears while traversing it
+        plan = policy.make_query_plan()
+        for _ in range(3):
+            next(plan)
+        policy.on_down(hosts[2])
+        policy.on_down(hosts[3])
+        # we continue with remainder of original list
+        self.assertEqual(len(list(plan)), 0 + 1)
+        policy.on_up(hosts[2])
+        policy.on_up(hosts[3])
+
+        another_host = Host(DefaultEndPoint(5), SimpleConvictionPolicy)
+        another_host.set_location_info("dc3", "rack1")
+        new_host.set_location_info("dc3", "rack1")
+
+        # new DC while traversing remote
+        plan = policy.make_query_plan()
+        for _ in range(3):
+            next(plan)
+        policy.on_up(new_host)
+        policy.on_up(another_host)
+        # we continue with remainder of original list
+        self.assertEqual(len(list(plan)), 0 + 1)
+
+        # remote DC disappears after finishing it
+        plan = policy.make_query_plan()
+        for _ in range(3):
+            next(plan)
+        last_host_in_this_dc = next(plan)
+        if last_host_in_this_dc in (new_host, another_host):
+            down_hosts = [new_host, another_host]
+        else:
+            down_hosts = hosts[2:]
+        for h in down_hosts:
+            policy.on_down(h)
+        # the last DC has two
+        self.assertEqual(len(list(plan)), 0 + 2)
+
+    def test_no_live_nodes(self):
+        """
+        Ensure query plan for a downed cluster will execute without errors
+        """
+
+        hosts = []
+        for i in range(4):
+            h = Host(DefaultEndPoint(i), SimpleConvictionPolicy)
+            h.set_location_info("dc1", "rack1")
+            hosts.append(h)
+
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=1)
+        policy.populate(Mock(), hosts)
+
+        for host in hosts:
+            policy.on_down(host)
+
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(qplan, [])
+
+    def test_no_nodes(self):
+        """
+        Ensure query plan for an empty cluster will execute without errors
+        """
+
+        policy = RackAwareRoundRobinPolicy("dc1", "rack1", used_hosts_per_remote_dc=1)
+        policy.populate(None, [])
+
+        qplan = list(policy.make_query_plan())
+        self.assertEqual(qplan, [])
+
+    def test_default_dc(self):
+        host_local_rack = Host(DefaultEndPoint(1), SimpleConvictionPolicy, 'local', 'rack1')
+        host_local = Host(DefaultEndPoint(2), SimpleConvictionPolicy, 'local', 'rack2')
+        host_remote = Host(DefaultEndPoint(3), SimpleConvictionPolicy, 'remote', 'rack2')
+        host_none = Host(DefaultEndPoint(1), SimpleConvictionPolicy)
+
+        # contact point is '1'
+        cluster = Mock(endpoints_resolved=[DefaultEndPoint(1)])
+
+        # contact DC first
+        policy = RackAwareRoundRobinPolicy()
+        policy.populate(cluster, [host_none])
+        self.assertFalse(policy.local_dc)
+        self.assertFalse(policy.local_rack)
+        policy.on_add(host_local_rack)
+        policy.on_add(host_local)
+        policy.on_add(host_remote)
+        self.assertNotEqual(policy.local_dc, host_remote.datacenter)
+        self.assertNotEqual(policy.local_rack, host_local.rack)
+        self.assertEqual(policy.local_dc, host_local_rack.datacenter)
+        self.assertEqual(policy.local_rack, host_local_rack.rack)
+
+        # contact DC second
+        policy = RackAwareRoundRobinPolicy()
+        policy.populate(cluster, [host_none])
+        self.assertFalse(policy.local_dc)
+        self.assertFalse(policy.local_rack)
+        policy.on_add(host_remote)
+        policy.on_add(host_local_rack)
+        policy.on_add(host_local)
+        self.assertNotEqual(policy.local_dc, host_remote.datacenter)
+        self.assertNotEqual(policy.local_rack, host_local.rack)
+        self.assertEqual(policy.local_dc, host_local_rack.datacenter)
+        self.assertEqual(policy.local_rack, host_local_rack.rack)
+
+        # no DC
+        policy = RackAwareRoundRobinPolicy()
+        policy.populate(cluster, [host_none])
+        self.assertFalse(policy.local_dc)
+        self.assertFalse(policy.local_rack)
+        policy.on_add(host_none)
+        self.assertFalse(policy.local_dc)
+        self.assertFalse(policy.local_rack)
+
+        # only other DC
+        policy = RackAwareRoundRobinPolicy()
+        policy.populate(cluster, [host_none])
+        self.assertFalse(policy.local_dc)
+        self.assertFalse(policy.local_rack)
+        policy.on_add(host_remote)
+        self.assertFalse(policy.local_dc)
+        self.assertFalse(policy.local_rack)
 
 
 class TokenAwarePolicyTest(unittest.TestCase):
@@ -1277,7 +1653,7 @@ class WhiteListRoundRobinPolicyTest(unittest.TestCase):
         self.assertEqual(sorted(qplan), [host])
 
         self.assertEqual(policy.distance(host), HostDistance.LOCAL)
-    
+
     def test_hosts_with_socket_hostname(self):
         hosts = [UnixSocketEndPoint('/tmp/scylla-workdir/cql.m')]
         policy = WhiteListRoundRobinPolicy(hosts)
