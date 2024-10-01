@@ -1015,7 +1015,7 @@ class Cluster(object):
     cloud = None
     """
     A dict of the cloud configuration. Example::
-        
+
         {
             # path to the secure connect bundle
             'secure_connect_bundle': '/path/to/secure-connect-dbname.zip',
@@ -1779,7 +1779,7 @@ class Cluster(object):
                           self.contact_points, self.protocol_version)
                 self.connection_class.initialize_reactor()
                 _register_cluster_shutdown(self)
-                
+
                 self._add_resolved_hosts()
 
                 try:
@@ -3628,7 +3628,7 @@ class ControlConnection(object):
         if old:
             log.debug("[control connection] Closing old connection %r, replacing with %r", old, conn)
             old.close()
-    
+
     def _connect_host_in_lbp(self):
         errors = {}
         lbp = (
@@ -3649,7 +3649,7 @@ class ControlConnection(object):
                 log.warning("[control connection] Error connecting to %s:", host, exc_info=True)
             if self._is_shutdown:
                 raise DriverException("[control connection] Reconnection in progress during shutdown")
-        
+
         return (None, errors)
 
     def _reconnect_internal(self):
@@ -3673,7 +3673,7 @@ class ControlConnection(object):
         (conn, errors) = self._connect_host_in_lbp()
         if conn is not None:
             return conn
-        
+
         raise NoHostAvailable("Unable to connect to any servers", errors)
 
     def _try_connect(self, host):
