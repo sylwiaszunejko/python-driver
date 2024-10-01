@@ -1991,7 +1991,7 @@ class Cluster(object):
             futures_results = []
             callback = partial(self._on_up_future_completed, host, futures, futures_results, futures_lock)
             for session in tuple(self.sessions):
-                future = session.add_or_renew_pool(host, is_host_addition=False)
+                future = session.add_or_renew_pool(host, is_host_addition=False, require_previous_shutdown_or_none=False)
                 if future is not None:
                     have_future = True
                     future.add_done_callback(callback)
@@ -2130,7 +2130,7 @@ class Cluster(object):
 
         have_future = False
         for session in tuple(self.sessions):
-            future = session.add_or_renew_pool(host, is_host_addition=True)
+            future = session.add_or_renew_pool(host, is_host_addition=True, require_previous_shutdown_or_none=False)
             if future is not None:
                 have_future = True
                 futures.add(future)
@@ -2661,7 +2661,7 @@ class Session(object):
         # create connection pools in parallel
         self._initial_connect_futures = set()
         for host in hosts:
-            future = self.add_or_renew_pool(host, is_host_addition=False)
+            future = self.add_or_renew_pool(host, is_host_addition=False, require_previous_shutdown_or_none=False)
             if future:
                 self._initial_connect_futures.add(future)
 
@@ -3284,7 +3284,7 @@ class Session(object):
             # when cluster.shutdown() is called explicitly.
             pass
 
-    def add_or_renew_pool(self, host, is_host_addition):
+    def add_or_renew_pool(self, host, is_host_addition, require_previous_shutdown_or_none):
         """
         For internal use only.
         """
@@ -3332,7 +3332,11 @@ class Session(object):
                         self._lock.acquire()
                         return False
                     self._lock.acquire()
-                self._pools[host] = new_pool
+                if require_previous_shutdown_or_none and (previous and not previous.is_shutdown):
+                    new_pool.shutdown()
+                    return True
+                else:
+                    self._pools[host] = new_pool
 
             log.debug("Added pool for host %s to session", host)
             if previous:
@@ -3372,7 +3376,7 @@ class Session(object):
                 # to allow us to attempt connections to hosts that have gone from ignored to something
                 # else.
                 if distance != HostDistance.IGNORED and host.is_up in (True, None):
-                    future = self.add_or_renew_pool(host, False)
+                    future = self.add_or_renew_pool(host, False, require_previous_shutdown_or_none=True)
             elif distance != pool.host_distance:
                 # the distance has changed
                 if distance == HostDistance.IGNORED:
