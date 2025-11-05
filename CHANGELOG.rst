@@ -1,3 +1,18 @@
+3.29.5
+======
+November 5, 2025
+
+Bug Fixes
+---------
+* Update TokenAwarePolicy.make_query_plan to schedule to replicas first (#548)
+* Drop _tablets_routing_v1 flag from token-aware policy (#547)
+* Fix dc aware and rack aware policies initialization (#546)
+* Fix Cluster.metadata_request_timeout and default it from control_connection_timeout (#539)
+
+Others
+------
+* Drop python 3.9 support (#564)
+
 3.29.4
 ======
 August 16, 2025
