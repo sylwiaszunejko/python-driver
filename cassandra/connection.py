@@ -21,7 +21,7 @@ import logging
 import socket
 import struct
 import sys
-from threading import Thread, Event, RLock, Condition
+from threading import Thread, Event, Lock, RLock, Condition
 import time
 import ssl
 import uuid
@@ -173,6 +173,28 @@ class EndPoint(object):
         """
         return socket.AF_UNSPEC
 
+    _tls_session_cache_key_override = None
+
+    @property
+    def tls_session_cache_key(self):
+        """
+        A hashable value identifying the TLS peer this endpoint connects to,
+        used to look up cached TLS sessions (see
+        :class:`~.SSLSessionCache`).  Two endpoints may share a key only if a
+        TLS session established with one is valid for the other.
+
+        An endpoint built to reach a node that another one already describes --
+        an alternate listener of the same server -- carries that node's key
+        here, so both share one cached session.  Subclasses give their own
+        identity in :meth:`_default_tls_session_cache_key`.
+        """
+        if self._tls_session_cache_key_override is not None:
+            return self._tls_session_cache_key_override
+        return self._default_tls_session_cache_key()
+
+    def _default_tls_session_cache_key(self):
+        return (self.address, self.port)
+
     def resolve(self):
         """
         Resolve the endpoint to an address/port. This is called
@@ -286,6 +308,11 @@ class SniEndPoint(EndPoint):
     @property
     def ssl_options(self):
         return self._ssl_options
+
+    def _default_tls_session_cache_key(self):
+        # Several SNI endpoints share a proxy address and port, but each one
+        # presents a different server_name and therefore a different TLS peer.
+        return (self.address, self.port, self._server_name)
 
     def resolve(self):
         try:
@@ -464,6 +491,11 @@ class ClientRoutesEndPoint(EndPoint):
     @property
     def host_id(self) -> uuid.UUID:
         return self._host_id
+
+    def _default_tls_session_cache_key(self):
+        # The proxy address this endpoint resolves to may change between
+        # connections; the TLS peer is identified by the node behind it.
+        return (self._host_id, self._original_address, self._original_port)
 
     def resolve(self) -> Tuple[str, int]:
         """
@@ -791,6 +823,179 @@ class ShardAwarePortGenerator:
 
 
 DefaultShardAwarePortGenerator = ShardAwarePortGenerator(DEFAULT_LOCAL_PORT_LOW, DEFAULT_LOCAL_PORT_HIGH)
+
+
+class SSLSessionCache(object):
+    """
+    A thread-safe, bounded cache of TLS sessions, keyed by TLS peer identity.
+
+    TLS clients can skip the expensive part of a handshake by replaying a
+    session established earlier with the same peer (RFC 5077 session tickets
+    for TLS 1.2, RFC 8446 pre-shared keys for TLS 1.3).  OpenSSL never does
+    this on its own -- the client has to hold on to the session and offer it
+    on the next connection -- so the driver keeps one of these caches per
+    :class:`~.Cluster` and reuses sessions across every connection it opens,
+    most importantly the burst of per-shard connections opened to a node at
+    once.
+
+    A cached session is not consumed by being used: the same session can be
+    replayed by any number of concurrent connections, and each successful
+    handshake stores a fresh session back, so the entry keeps rolling
+    forward.  An entry whose lifetime has run out is never handed out again, and
+    is dropped when it is looked up or when room is needed; entries otherwise
+    go only by being replaced or, once the cache is full, by having been used
+    least recently.  A session the server declines for any other reason simply
+    results in a full handshake, which is what would have happened anyway.
+
+    Instances may be shared between clusters, and are safe to use from
+    multiple threads.
+    """
+
+    def __init__(self, max_size=1024):
+        """
+        :param max_size: maximum number of peers to keep sessions for.  When
+            exceeded, the least recently used entry is evicted.
+        """
+        # Anything but a positive integer is rejected outright rather than
+        # compared against: a float such as nan or inf would pass a `< 1` check
+        # and then leave the cache growing without bound, while True is an int
+        # that passes it and would quietly cap the cache at one entry.
+        if (not isinstance(max_size, int) or isinstance(max_size, bool)
+                or max_size < 1):
+            raise ValueError(
+                "max_size must be a positive integer, got %r" % (max_size,))
+        self._max_size = max_size
+        self._sessions = OrderedDict()
+        # SSLContext -> how many clusters are still using it.  See
+        # acquire_context.
+        self._context_owners = {}
+        self._lock = Lock()
+
+    @property
+    def max_size(self):
+        """The maximum number of peers this cache keeps sessions for."""
+        return self._max_size
+
+    def get(self, key):
+        """
+        Return the cached session for *key*, or :const:`None` if there is none
+        or its lifetime has run out.  A session that is still live stays in the
+        cache; an expired one is dropped.
+        """
+        with self._lock:
+            entry = self._sessions.get(key)
+            if entry is None:
+                return None
+            session, expires_at = entry
+            if expires_at is not None and time.monotonic() >= expires_at:
+                del self._sessions[key]
+                return None
+            self._sessions.move_to_end(key)
+            return session
+
+    def set(self, key, session, lifetime=None):
+        """
+        Store *session* as the session to offer for *key*, replacing any
+        previous one.  A :const:`None` session is ignored.
+
+        :param lifetime: how much longer, in seconds, the session may be
+            offered.  Once it has passed, the entry is dropped rather than
+            returned.  :const:`None` means no limit, which callers should
+            reserve for sessions that carry no lifetime of their own.
+        """
+        if session is None:
+            return
+        expires_at = None if lifetime is None else time.monotonic() + lifetime
+        with self._lock:
+            self._sessions[key] = (session, expires_at)
+            self._sessions.move_to_end(key)
+            if len(self._sessions) > self._max_size:
+                # Whose lifetime has run out and which was used least recently
+                # are independent once peers announce different lifetimes, so
+                # evicting purely by recency can drop a live entry and keep a
+                # dead one.  Take the dead ones first.
+                self._drop_expired_unlocked()
+            while len(self._sessions) > self._max_size:
+                self._sessions.popitem(last=False)
+
+    def _drop_expired_unlocked(self):
+        now = time.monotonic()
+        for key in [key for key, (_, expires_at) in self._sessions.items()
+                    if expires_at is not None and now >= expires_at]:
+            del self._sessions[key]
+
+    def discard(self, key, session=None):
+        """
+        Drop the session cached for *key*, if any.
+
+        Give *session* to drop it only while that is still the cached one.  A
+        caller acting on a session it read earlier needs this: by the time it
+        decides to drop it, another connection may have stored a fresh session
+        under the same key, and that one is not the caller's to remove.
+        """
+        with self._lock:
+            entry = self._sessions.get(key)
+            if entry is None:
+                return
+            if session is not None and entry[0] is not session:
+                return
+            del self._sessions[key]
+
+    def acquire_context(self, ssl_context):
+        """
+        Register a user of *ssl_context*, whose sessions are to be kept until
+        every user has released it again.
+
+        A cached session holds a strong reference to the ``SSLContext`` it was
+        established with, so an entry keeps that context -- and the certificate
+        chain, trust store and OpenSSL state reachable from it -- alive, which
+        is why a cache outliving its clusters cannot simply keep everything.
+        But sessions can only be replayed onto the context they came from, so
+        clusters sharing this cache to share sessions are also sharing one
+        context: dropping a context's sessions as soon as any one of them shuts
+        down would take sessions the others are still using.  Counting the
+        users is what tells those two cases apart.
+        """
+        with self._lock:
+            self._context_owners[ssl_context] = \
+                self._context_owners.get(ssl_context, 0) + 1
+
+    def release_context(self, ssl_context):
+        """
+        Give up one registration made by :meth:`acquire_context`, dropping
+        every session established with *ssl_context* once the last one goes.
+
+        Does nothing for a context that was never registered.  Entries keyed
+        the way :meth:`.Connection._tls_session_cache_key` builds them -- a
+        tuple naming its context first -- are the only ones that can belong to
+        a context, so anything else a caller has put in the cache is left
+        alone.
+        """
+        with self._lock:
+            owners = self._context_owners.get(ssl_context)
+            if owners is None:
+                return
+            if owners > 1:
+                self._context_owners[ssl_context] = owners - 1
+                return
+
+            del self._context_owners[ssl_context]
+            for key in [k for k in self._sessions
+                        if isinstance(k, tuple) and k and k[0] is ssl_context]:
+                del self._sessions[key]
+
+    def clear(self):
+        """Drop all cached sessions."""
+        with self._lock:
+            self._sessions.clear()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._sessions)
+
+    def __repr__(self):
+        return "<%s max_size=%d size=%d>" % (
+            self.__class__.__name__, self._max_size, len(self))
 
 
 class Connection(object):
