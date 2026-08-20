@@ -1565,7 +1565,7 @@ class Connection(object):
         log.debug("Sending StartupMessage on %s", self)
         opts = {'DRIVER_NAME': DRIVER_NAME,
                 'DRIVER_VERSION': DRIVER_VERSION,
-                **extra_options}
+                **(extra_options or {})}
         if compression:
             opts['COMPRESSION'] = compression
         if no_compact:

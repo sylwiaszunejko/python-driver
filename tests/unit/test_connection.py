@@ -22,7 +22,8 @@ from cassandra import OperationTimedOut
 from cassandra.cluster import Cluster
 from cassandra.connection import (Connection, HEADER_DIRECTION_TO_CLIENT, ProtocolError,
                                   locally_supported_compressions, ConnectionHeartbeat, HeartbeatFuture, _Frame, Timer, TimerManager,
-                                  ConnectionException, ConnectionShutdown, DefaultEndPoint, ShardAwarePortGenerator)
+                                  ConnectionException, ConnectionShutdown, DefaultEndPoint, ShardAwarePortGenerator,
+                                  DRIVER_NAME)
 from cassandra.marshal import uint8_pack, uint32_pack, int32_pack
 from cassandra.protocol import (write_stringmultimap, write_int, write_string,
                                 SupportedMessage, ProtocolHandler, ResultMessage,
@@ -237,6 +238,30 @@ class ConnectionTest(unittest.TestCase):
         c.process_msg(message, len(message) - 8)
 
         assert c.decompressor == None
+
+    def test_startup_message_can_be_sent_without_extra_options(self):
+        """
+        _send_startup_message defaults extra_options to None but splats it, so
+        omitting it raised a TypeError that defunct_on_error turned into a silent
+        defunct: no STARTUP frame was ever sent.
+
+        The only caller inside the driver always passes a dict, so the default
+        went unexercised; the caller that does omit it is the mock the simulacron
+        heartbeat test installs over the options exchange, which has therefore
+        been defuncting every connection it touched.
+        """
+        c = self.make_connection()
+        c.send_msg = Mock()
+        c.defunct = Mock()
+        c.cql_version = '3.0.3'
+
+        c._send_startup_message(no_compact=True)
+
+        c.defunct.assert_not_called()
+        c.send_msg.assert_called_once()
+        options = c.send_msg.call_args[0][0].options
+        assert options['DRIVER_NAME'] == DRIVER_NAME
+        assert options['NO_COMPACT'] == 'true'
 
     def test_not_implemented(self):
         """
