@@ -31,6 +31,8 @@ import itertools
 from typing import Any, Dict, Optional, Tuple, Union
 
 from cassandra.application_info import ApplicationInfoBase
+from cassandra.driver_config import (DriverConfigReporter, DRIVER_CONFIG_OPTION,
+                                     SESSION_ID_OPTION)
 from cassandra.client_routes import _ClientRoutesHandler
 from cassandra.protocol_features import ProtocolFeatures
 
@@ -878,6 +880,16 @@ class Connection(object):
     features = None
     _application_info: Optional[ApplicationInfoBase] = None
 
+    # Identifier of the cluster this connection belongs to, reported in the
+    # SESSION_ID startup option so that all of a cluster's connections can be
+    # correlated with each other in the clients table.
+    _session_id = None
+
+    # Set on every connection, but only used by the control connection, which is
+    # the only one reporting the driver configuration. Left as None when the
+    # cluster has configuration reporting disabled.
+    _driver_config_reporter: Optional[DriverConfigReporter] = None
+
     @property
     def _iobuf(self):
         # backward compatibility, to avoid any change in the reactors
@@ -888,7 +900,8 @@ class Connection(object):
                  cql_version=None, protocol_version=ProtocolVersion.MAX_SUPPORTED, is_control_connection=False,
                  user_type_map=None, connect_timeout=None, allow_beta_protocol_version=False, no_compact=False,
                  ssl_context=None, owning_pool=None, shard_id=None, total_shards=None,
-                 on_orphaned_stream_released=None, application_info: Optional[ApplicationInfoBase] = None):
+                 on_orphaned_stream_released=None, application_info: Optional[ApplicationInfoBase] = None,
+                 session_id=None, driver_config_reporter: Optional[DriverConfigReporter] = None):
         # TODO next major rename host to endpoint and remove port kwarg.
         self.endpoint = host if isinstance(host, EndPoint) else DefaultEndPoint(host, port)
 
@@ -912,6 +925,8 @@ class Connection(object):
         self.orphaned_request_ids = set()
         self._on_orphaned_stream_released = on_orphaned_stream_released
         self._application_info = application_info
+        self._session_id = session_id
+        self._driver_config_reporter = driver_config_reporter
 
         if ssl_options:
             self.ssl_options.update(self.endpoint.ssl_options or {})
@@ -1506,6 +1521,49 @@ class Connection(object):
         if self._application_info:
             self._application_info.add_startup_options(options)
         self.features.add_startup_options(options)
+
+        # Driver-owned options go in after the application's, so that they can
+        # overwrite them and never the other way round. An application that set
+        # SESSION_ID would break correlating a cluster's connections in the
+        # clients table, which is the only reason the option exists; one that set
+        # DRIVER_CONFIG would have an operator read its value as the driver's
+        # description of itself; and one that set DRIVER_NAME or DRIVER_VERSION
+        # would misreport the driver for the life of the connection, to the same
+        # operator and in the same row.
+        #
+        # They are cleared rather than merely overwritten, so that ownership does
+        # not depend on this connection having something to say: a pool
+        # connection reports no configuration at all, and neither does a control
+        # connection whose report was dropped or turned off. DRIVER_NAME and
+        # DRIVER_VERSION are then put back by _send_startup_message, the only
+        # place that knows them. CQL_VERSION needs no entry here: StartupMessage
+        # writes it after the options map, so it cannot be overridden either.
+        for owned_key in (SESSION_ID_OPTION, DRIVER_CONFIG_OPTION,
+                          'DRIVER_NAME', 'DRIVER_VERSION'):
+            if options.pop(owned_key, None) is not None:
+                # The application info is one object shared by every connection of
+                # a cluster, so an offending key is seen on all of them: warning
+                # on each would mean hosts x shards + 1 lines per connect(), and
+                # as many again on every pool replacement or control connection
+                # reconnect, for a misconfiguration that is in the application's
+                # code and identical on all of them.
+                #
+                # Warn on the control connection, which is established once per
+                # cluster and before the pools, and keep the rest at debug for
+                # whoever is looking at a specific connection.
+                level = logging.WARNING if self.is_control_connection else logging.DEBUG
+                log.log(level,
+                        "Ignoring the application-supplied %s startup option on %s: "
+                        "the option is reserved for the driver", owned_key, self.endpoint)
+
+        if self._session_id is not None:
+            options[SESSION_ID_OPTION] = str(self._session_id)
+
+        # The configuration is the same for every connection of a cluster, so
+        # only the control connection reports it. A reporter left as None means
+        # the cluster has configuration reporting disabled.
+        if self.is_control_connection and self._driver_config_reporter is not None:
+            self._driver_config_reporter.add_startup_options(options)
 
         if self.cql_version:
             if self.cql_version not in supported_cql_versions:

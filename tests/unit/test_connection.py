@@ -13,22 +13,27 @@
 # limitations under the License.
 import itertools
 import unittest
+import uuid
 from io import BytesIO
 import time
 from threading import Lock
 from unittest.mock import Mock, ANY, call, patch
 
 from cassandra import OperationTimedOut
+from cassandra.application_info import ApplicationInfoBase
 from cassandra.cluster import Cluster
 from cassandra.connection import (Connection, HEADER_DIRECTION_TO_CLIENT, ProtocolError,
                                   locally_supported_compressions, ConnectionHeartbeat, HeartbeatFuture, _Frame, Timer, TimerManager,
                                   ConnectionException, ConnectionShutdown, DefaultEndPoint, ShardAwarePortGenerator,
-                                  DRIVER_NAME)
+                                  DRIVER_NAME, DRIVER_VERSION)
+from cassandra.driver_config import (DriverConfigReporter, DRIVER_CONFIG_OPTION,
+                                     DRIVER_CONFIG_SCHEMA_VERSION, SESSION_ID_OPTION)
 from cassandra.marshal import uint8_pack, uint32_pack, int32_pack
 from cassandra.protocol import (write_stringmultimap, write_int, write_string,
-                                SupportedMessage, ProtocolHandler, ResultMessage,
-                                RESULT_KIND_SET_KEYSPACE)
+                                read_stringmap, SupportedMessage, ProtocolHandler,
+                                ResultMessage, RESULT_KIND_SET_KEYSPACE)
 
+from tests.unit.utils import ThrowingReporter
 from tests.util import wait_until, assertRegex
 import pytest
 
@@ -407,6 +412,219 @@ class ConnectionTest(unittest.TestCase):
         error_message = str(exc_info.value)
         assert "already closed" in error_message
         assert "Bad file descriptor" in error_message
+
+
+class StartupOptionsTest(unittest.TestCase):
+    """
+    Covers the options the driver puts in the STARTUP frame, by driving a
+    connection through the SUPPORTED response that triggers it and reading the
+    frame it hands to send_msg.
+    """
+
+    SESSION_ID = uuid.UUID('91b0b1a2-0000-4000-8000-000000000001')
+
+    def startup_options(self, **kwargs):
+        c = Connection(DefaultEndPoint('1.2.3.4'), **kwargs)
+        c._socket = Mock()
+        c.send_msg = Mock()
+        c.defunct = Mock()
+
+        c._handle_options_response(
+            SupportedMessage(cql_versions=['3.0.3'], options={'COMPRESSION': []}))
+
+        c.defunct.assert_not_called()
+        c.send_msg.assert_called_once()
+        return c.send_msg.call_args[0][0].options
+
+    def test_session_id_is_reported(self):
+        options = self.startup_options(session_id=self.SESSION_ID)
+
+        assert options[SESSION_ID_OPTION] == str(self.SESSION_ID)
+
+    def test_session_id_is_absent_when_not_configured(self):
+        """
+        Connections built outside of a Cluster (lower-level integrations, tests)
+        have no cluster to be correlated with, so they report no SESSION_ID
+        rather than an empty one.
+        """
+        options = self.startup_options()
+
+        assert SESSION_ID_OPTION not in options
+
+    def test_application_info_cannot_override_the_session_id(self):
+        """
+        SESSION_ID is driver-owned: it is what correlates a cluster's connections
+        in the clients table, so an application-supplied value must not win.
+        """
+        class SpoofingApplicationInfo(ApplicationInfoBase):
+            def add_startup_options(self, options):
+                options[SESSION_ID_OPTION] = 'not-the-session-id'
+                options['APPLICATION_NAME'] = 'app'
+
+        options = self.startup_options(session_id=self.SESSION_ID,
+                                       application_info=SpoofingApplicationInfo())
+
+        assert options[SESSION_ID_OPTION] == str(self.SESSION_ID)
+        # Keys the driver does not own must still come through.
+        assert options['APPLICATION_NAME'] == 'app'
+
+    def test_application_info_cannot_override_the_driver_config(self):
+        """
+        DRIVER_CONFIG is driver-owned too: an operator reading it out of the
+        clients table must be reading the driver's description of itself, not an
+        application's. That has to hold on the connections and in the
+        configurations that report none of their own, which is where merely
+        writing it last would leave the application's value standing.
+        """
+        class SpoofingApplicationInfo(ApplicationInfoBase):
+            def add_startup_options(self, options):
+                options[DRIVER_CONFIG_OPTION] = '{"version":999,"spoofed":true}'
+                options['APPLICATION_NAME'] = 'app'
+
+        # Four independent guarantees, each in its own subtest: run sequentially
+        # the first regression would hide the other three, and which of them
+        # break is what says where the hole is.
+        ABSENT = object()
+        cases = [
+            ("a pool connection reports no configuration at all",
+             {'driver_config_reporter': DriverConfigReporter()},
+             ABSENT),
+            ("nor does a control connection with reporting disabled",
+             {'is_control_connection': True},
+             ABSENT),
+            ("a dropped report is not a hole for one either",
+             {'is_control_connection': True, 'driver_config_reporter': ThrowingReporter()},
+             ABSENT),
+            ("the driver's own report wins where there is one",
+             {'is_control_connection': True, 'driver_config_reporter': DriverConfigReporter()},
+             '{"version":%d}' % DRIVER_CONFIG_SCHEMA_VERSION),
+        ]
+
+        for description, kwargs, expected in cases:
+            with self.subTest(description):
+                options = self.startup_options(session_id=self.SESSION_ID,
+                                               application_info=SpoofingApplicationInfo(),
+                                               **kwargs)
+                if expected is ABSENT:
+                    assert DRIVER_CONFIG_OPTION not in options
+                else:
+                    assert options[DRIVER_CONFIG_OPTION] == expected
+                # Keys the driver does not own must still come through.
+                assert options['APPLICATION_NAME'] == 'app'
+
+    def test_application_info_cannot_override_the_driver_identity(self):
+        """
+        DRIVER_NAME and DRIVER_VERSION are driver-owned for the same reason as
+        the two options above: they land in the same clients-table row, read by
+        the same operator, and a spoofed value would misreport the driver for the
+        life of the connection.
+
+        They are the pair that made the ordering matter: _send_startup_message
+        merges the application's options *after* its own literals, so before they
+        were cleared here an application-supplied value won.
+        """
+        class SpoofingApplicationInfo(ApplicationInfoBase):
+            def add_startup_options(self, options):
+                options['DRIVER_NAME'] = 'not-the-driver'
+                options['DRIVER_VERSION'] = '0.0.0'
+                options['APPLICATION_NAME'] = 'app'
+
+        options = self.startup_options(application_info=SpoofingApplicationInfo())
+
+        assert options['DRIVER_NAME'] == DRIVER_NAME
+        assert options['DRIVER_VERSION'] == DRIVER_VERSION
+        # Keys the driver does not own must still come through.
+        assert options['APPLICATION_NAME'] == 'app'
+
+    def test_ignored_option_is_warned_about_once_per_cluster(self):
+        """
+        The offending key is on every connection of the cluster, since they share
+        one application info object, so warning on each would mean
+        hosts x shards + 1 lines per connect() and as many again on every pool
+        replacement. The control connection, established once and before the
+        pools, carries the warning; the rest stay at debug.
+        """
+        class SpoofingApplicationInfo(ApplicationInfoBase):
+            def add_startup_options(self, options):
+                options['DRIVER_NAME'] = 'not-the-driver'
+
+        with self.assertLogs('cassandra.connection', level='DEBUG') as captured:
+            self.startup_options(is_control_connection=True,
+                                 application_info=SpoofingApplicationInfo())
+        assert [r.getMessage() for r in captured.records if r.levelname == 'WARNING'] == [
+            "Ignoring the application-supplied DRIVER_NAME startup option on 1.2.3.4:9042: "
+            "the option is reserved for the driver"]
+
+        with self.assertLogs('cassandra.connection', level='DEBUG') as captured:
+            self.startup_options(application_info=SpoofingApplicationInfo())
+        assert [r.levelname for r in captured.records if 'DRIVER_NAME' in r.getMessage()] == ['DEBUG']
+
+    def test_application_info_cannot_override_the_cql_version(self):
+        """
+        CQL_VERSION is driver-owned as well, but needs no clearing: StartupMessage
+        writes it after the options map. Pinned here so that the reason the key is
+        absent from the cleared set stays true.
+        """
+        class SpoofingApplicationInfo(ApplicationInfoBase):
+            def add_startup_options(self, options):
+                options['CQL_VERSION'] = '9.9.9'
+
+        c = Connection(DefaultEndPoint('1.2.3.4'),
+                       application_info=SpoofingApplicationInfo())
+        c._socket = Mock()
+        c.send_msg = Mock()
+        c.defunct = Mock()
+        c._handle_options_response(
+            SupportedMessage(cql_versions=['3.0.3'], options={'COMPRESSION': []}))
+        c.defunct.assert_not_called()
+
+        buf = BytesIO()
+        c.send_msg.call_args[0][0].send_body(buf, c.protocol_version)
+        buf.seek(0)
+        assert read_stringmap(buf)['CQL_VERSION'] == '3.0.3'
+
+    def test_driver_config_is_reported_on_the_control_connection(self):
+        options = self.startup_options(is_control_connection=True,
+                                       driver_config_reporter=DriverConfigReporter())
+
+        assert options[DRIVER_CONFIG_OPTION] == '{"version":%d}' % DRIVER_CONFIG_SCHEMA_VERSION
+
+    def test_driver_config_is_not_reported_on_a_regular_connection(self):
+        """
+        The configuration is the same for every connection of a cluster, so only
+        the control connection reports it; the pool connections still report the
+        session id that ties them to it.
+        """
+        options = self.startup_options(session_id=self.SESSION_ID,
+                                       driver_config_reporter=DriverConfigReporter())
+
+        assert SESSION_ID_OPTION in options
+        assert DRIVER_CONFIG_OPTION not in options
+
+    def test_driver_config_is_not_reported_without_a_reporter(self):
+        """
+        A reporter left as None is how a Cluster with
+        driver_config_reporting_enabled=False reaches its connections. The
+        session id is documented not to be affected by that setting.
+        """
+        options = self.startup_options(is_control_connection=True,
+                                       session_id=self.SESSION_ID)
+
+        assert options[SESSION_ID_OPTION] == str(self.SESSION_ID)
+        assert DRIVER_CONFIG_OPTION not in options
+
+    def test_a_failing_reporter_does_not_break_the_handshake(self):
+        """
+        Reporting is a diagnostic aid: a reporter that cannot produce a report
+        must leave the STARTUP frame otherwise intact rather than fail the
+        connection.
+        """
+        options = self.startup_options(is_control_connection=True,
+                                       session_id=self.SESSION_ID,
+                                       driver_config_reporter=ThrowingReporter())
+
+        assert DRIVER_CONFIG_OPTION not in options
+        assert options[SESSION_ID_OPTION] == str(self.SESSION_ID)
 
 
 @patch('cassandra.connection.ConnectionHeartbeat._raise_if_stopped')
