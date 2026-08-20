@@ -30,6 +30,11 @@ Clusters and Sessions
 
    .. autoattribute:: address_translator
 
+   .. autoattribute:: session_id
+
+   .. autoattribute:: driver_config_reporting_enabled
+      :annotation: = True
+
    .. autoattribute:: metrics_enabled
 
    .. autoattribute:: metrics
