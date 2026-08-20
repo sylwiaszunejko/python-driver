@@ -26,6 +26,7 @@ from cassandra import ConsistencyLevel, DriverException, Timeout, Unavailable, R
 from cassandra.cluster import _Scheduler, Session, Cluster, ResultSet, SchemaAgreementScope, ControlConnectionQueryFallback, default_lbp_factory, \
     ExecutionProfile, _ConfigMode, EXEC_PROFILE_DEFAULT
 from cassandra.connection import ConnectionBusy, ConnectionException
+from cassandra.driver_config import DriverConfigReporter
 from cassandra.pool import Host
 from cassandra.policies import HostDistance, RetryPolicy, RoundRobinPolicy, DowngradingConsistencyRetryPolicy, SimpleConvictionPolicy
 from cassandra.query import SimpleStatement, named_tuple_factory, tuple_factory
@@ -286,6 +287,98 @@ class ClusterTest(unittest.TestCase):
                 assert factory.call_count == 1
                 assert factory.call_args.kwargs['compression'] == expected
                 assert cluster.compression == expected
+
+    def test_session_id_is_stable_and_unique_per_cluster(self):
+        cluster = Cluster()
+        other = Cluster()
+        self.addCleanup(cluster.shutdown)
+        self.addCleanup(other.shutdown)
+
+        assert isinstance(cluster.session_id, uuid.UUID)
+        assert cluster.session_id == cluster.session_id
+        assert cluster.session_id != other.session_id
+
+    def test_session_id_is_read_only(self):
+        """
+        Every connection reports it at STARTUP, so it cannot change once any of
+        them is open without breaking the correlation it exists for.
+        """
+        cluster = Cluster()
+        self.addCleanup(cluster.shutdown)
+
+        with pytest.raises(AttributeError):
+            cluster.session_id = uuid.uuid4()
+
+    def test_connection_factory_reports_the_session_id_and_the_configuration(self):
+        endpoint = Mock(address='127.0.0.1')
+        with patch.object(Cluster.connection_class, 'factory', autospec=True, return_value='connection') as factory:
+            cluster = Cluster()
+            self.addCleanup(cluster.shutdown)
+            cluster.connection_factory(endpoint)
+
+        assert factory.call_args.kwargs['session_id'] == cluster.session_id
+        assert isinstance(factory.call_args.kwargs['driver_config_reporter'], DriverConfigReporter)
+
+    def test_driver_config_reporting_can_be_toggled_after_construction(self):
+        """
+        The flag is a plain published attribute, so it is read when a connection
+        is opened rather than captured at construction: setting it either way
+        used to be silently inert, in both directions.
+        """
+        endpoint = Mock(address='127.0.0.1')
+
+        def reporter_for(cluster):
+            with patch.object(Cluster.connection_class, 'factory', autospec=True,
+                              return_value='connection') as factory:
+                cluster.connection_factory(endpoint)
+            return factory.call_args.kwargs['driver_config_reporter']
+
+        cluster = Cluster()
+        self.addCleanup(cluster.shutdown)
+        assert reporter_for(cluster) is not None
+        cluster.driver_config_reporting_enabled = False
+        assert reporter_for(cluster) is None
+
+        # And back on again: a cluster built with reporting off must not be
+        # permanently unable to report. Registered before the rebinding, since
+        # afterwards the first cluster is no longer reachable to shut down.
+        cluster = Cluster(driver_config_reporting_enabled=False)
+        self.addCleanup(cluster.shutdown)
+        assert reporter_for(cluster) is None
+        cluster.driver_config_reporting_enabled = True
+        assert isinstance(reporter_for(cluster), DriverConfigReporter)
+
+    def test_connection_factory_passes_no_reporter_when_reporting_is_disabled(self):
+        """
+        A reporter left as None is how the setting reaches the connections. The
+        session id is documented not to be affected by it.
+        """
+        endpoint = Mock(address='127.0.0.1')
+        with patch.object(Cluster.connection_class, 'factory', autospec=True, return_value='connection') as factory:
+            cluster = Cluster(driver_config_reporting_enabled=False)
+            self.addCleanup(cluster.shutdown)
+            cluster.connection_factory(endpoint)
+
+        assert cluster.driver_config_reporting_enabled is False
+        assert factory.call_args.kwargs['driver_config_reporter'] is None
+        assert factory.call_args.kwargs['session_id'] == cluster.session_id
+
+    def test_connection_factory_ignores_a_caller_supplied_session_id_and_reporter(self):
+        """
+        Both describe the Cluster to the server, so they are assigned rather than
+        defaulted from the caller's kwargs: nothing may substitute the id that
+        correlates this cluster's connections, nor a reporter the cluster's own
+        setting turned off.
+        """
+        endpoint = Mock(address='127.0.0.1')
+        with patch.object(Cluster.connection_class, 'factory', autospec=True, return_value='connection') as factory:
+            cluster = Cluster(driver_config_reporting_enabled=False)
+            self.addCleanup(cluster.shutdown)
+            cluster.connection_factory(endpoint, session_id=uuid.uuid4(),
+                                       driver_config_reporter=DriverConfigReporter())
+
+        assert factory.call_args.kwargs['session_id'] == cluster.session_id
+        assert factory.call_args.kwargs['driver_config_reporter'] is None
 
 
 class SchedulerTest(unittest.TestCase):
