@@ -290,3 +290,76 @@ directly from the data.
 
 For full protocol details see the ScyllaDB CQL protocol extensions documentation:
 https://github.com/scylladb/scylladb/blob/master/docs/dev/protocol-extensions.md
+
+
+Client identification and configuration reporting
+-------------------------------------------------
+
+The driver describes itself to the cluster in the CQL ``STARTUP`` options of
+each connection. ScyllaDB echoes those options into the ``client_options``
+column of its clients table, so an operator investigating an incident can
+inspect them without access to the client host:
+
+.. code:: sql
+
+    SELECT address, port, client_options FROM system.clients;
+
+Two of the options are about the driver rather than the protocol:
+
+``SESSION_ID``
+  A UUID identifying the ``Cluster`` object, generated when it is created.
+  *Every* connection the ``Cluster`` opens reports it -- the control connection
+  as well as the pools of each of its ``Session`` objects -- so all of a
+  client's connections can be told apart from those of other clients sharing
+  the same host. Applications can read it back from ``cluster.session_id`` and
+  log it, which is what allows client-side observations to be matched against
+  the rows above instead of correlating them by address and port.
+
+  The option is named after the convention shared with the other ScyllaDB
+  drivers, where a "session" is what this driver calls a ``Cluster``. It is
+  unrelated to ``Session.session_id``, which identifies a ``Session`` within the
+  client and is never sent to the cluster.
+
+``DRIVER_CONFIG``
+  A JSON document describing the effective configuration of the ``Cluster``. It
+  is the same for every one of its connections, so only the control connection
+  reports it, keeping the other ``STARTUP`` frames small. The document carries a
+  ``version`` key naming the schema it follows; further keys are added as the
+  driver learns to describe more of its configuration, and adding one does not
+  bump the version.
+
+.. code:: python
+
+    from cassandra.cluster import Cluster
+
+    cluster = Cluster()
+    session = cluster.connect()
+
+    print(cluster.session_id)  # matches SESSION_ID in the clients table
+
+    for row in session.execute("SELECT client_options FROM system.clients"):
+        # client_options is null for rows the server has not filled in yet.
+        if not row.client_options:
+            continue
+        if row.client_options.get('SESSION_ID') == str(cluster.session_id):
+            print(row.client_options)
+
+Reporting the configuration is a diagnostic aid and never interferes with
+connecting: a report that cannot be built, or that would not fit in a
+``STARTUP`` option, is logged and left out instead of failing the handshake.
+
+It can be turned off with ``driver_config_reporting_enabled``:
+
+.. code:: python
+
+    cluster = Cluster(driver_config_reporting_enabled=False)
+
+``SESSION_ID`` is unaffected by that setting: it carries no configuration, only
+the identity that ties a client's connections together, and every connection
+keeps reporting it.
+
+Alongside these, the ``application_info`` ``Cluster`` argument lets an
+application add its own name, version and identifier to the same options, as
+``APPLICATION_NAME``, ``APPLICATION_VERSION`` and ``CLIENT_ID``. Those are the
+application's to choose; ``SESSION_ID`` and ``DRIVER_CONFIG`` are driver-owned
+and cannot be overridden through it.

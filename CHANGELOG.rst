@@ -3,12 +3,30 @@ Unreleased
 
 Features
 --------
+* Report the driver's identity and configuration in the ``STARTUP`` options, where
+  ScyllaDB exposes them in the ``client_options`` column of its clients table
+  (DRIVER-950). Every connection now sends ``SESSION_ID``, a UUID identifying the
+  ``Cluster`` it belongs to and readable from the new ``Cluster.session_id``, so all of
+  a client's connections can be correlated with each other and with its own logs. The
+  control connection additionally sends ``DRIVER_CONFIG``, a JSON description of the
+  effective configuration, which for now carries only the schema version it follows.
+  Reporting the configuration can be turned off with the new
+  ``Cluster(driver_config_reporting_enabled=False)``; ``SESSION_ID`` is unaffected by
+  that setting. Reporting is best effort and never prevents a connection from being
+  established.
 * Negotiate and implement the ``SCYLLA_USE_METADATA_ID`` protocol extension: prepared
   statements skip re-sending result metadata on EXECUTE, and the driver automatically
   refreshes cached metadata when the server detects a schema change (DRIVER-153)
 
 Others
 ------
+* The ``STARTUP`` options that describe the driver itself are no longer the
+  application's to set. An ``ApplicationInfoBase.add_startup_options`` that sets
+  ``DRIVER_NAME``, ``DRIVER_VERSION``, ``SESSION_ID`` or ``DRIVER_CONFIG`` now has that
+  value dropped, with a warning naming the option; keys the driver does not own still
+  come through unchanged. Previously ``DRIVER_NAME`` and ``DRIVER_VERSION`` could be
+  overridden, which misreported the driver to the server for the life of the connection
+  and, in the clients table, to the operator reading the row.
 * ``PreparedStatement.result_metadata`` and ``PreparedStatement.result_metadata_id`` are
   now read-only. They are replaced together by
   ``PreparedStatement.update_result_metadata()``, so a request can never observe a metadata
