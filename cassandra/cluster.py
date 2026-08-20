@@ -93,6 +93,7 @@ from cassandra.datastax.graph import (graph_object_row_factory, GraphOptions, Gr
 from cassandra.datastax.graph.query import _request_timeout_key, _GraphSONContextRowFactory
 from cassandra.datastax import cloud as dscloud
 from cassandra.application_info import ApplicationInfoBase
+from cassandra.driver_config import DriverConfigReporter
 
 try:
     from weakref import WeakSet
@@ -1020,6 +1021,47 @@ class Cluster(object):
     documentation for :meth:`Session.timestamp_generator`.
     """
 
+    driver_config_reporting_enabled = True
+    """
+    A boolean indicating whether the driver describes its effective
+    configuration to the cluster while setting up the control connection, so
+    that operators can inspect the settings of a client while investigating an
+    incident. The description is sent as the ``DRIVER_CONFIG`` startup option
+    and ScyllaDB exposes it in the ``client_options`` column of its clients
+    table.
+
+    :attr:`~.Cluster.session_id`, which every connection reports, is not
+    affected by this setting.
+
+    Read when a connection is opened, so changing it takes effect on the
+    connections established afterwards and leaves the open ones alone.
+
+    Defaults to :const:`True`.
+    """
+
+    _session_id = None
+
+    @property
+    def session_id(self):
+        """
+        A :class:`uuid.UUID` identifying this ``Cluster``, generated when it is
+        created and never changing afterwards.
+
+        Every connection this ``Cluster`` opens -- the control connection as
+        well as the pools of each of its :class:`~.Session` objects -- reports
+        it to the cluster as the ``SESSION_ID`` startup option, where ScyllaDB
+        exposes it in the ``client_options`` column of its clients table.
+        Logging it, or attaching it to a support bundle, is what allows
+        client-side observations to be matched against those rows instead of
+        correlating them by address and port.
+
+        The option is named after the convention shared with the other ScyllaDB
+        drivers, where a "session" is what this driver calls a ``Cluster``. It is
+        unrelated to :attr:`.Session.session_id`, which identifies a ``Session``
+        within the client and is never reported to the cluster.
+        """
+        return self._session_id
+
     cloud = None
     """
     A dict of the cloud configuration. Example::
@@ -1178,7 +1220,8 @@ class Cluster(object):
                  column_encryption_policy=None,
                  application_info:Optional[ApplicationInfoBase]=None,
                  client_routes_config:Optional[ClientRoutesConfig]=None,
-                 allow_control_connection_query_fallback:Optional[ControlConnectionQueryFallback]=ControlConnectionQueryFallback.Disabled
+                 allow_control_connection_query_fallback:Optional[ControlConnectionQueryFallback]=ControlConnectionQueryFallback.Disabled,
+                 driver_config_reporting_enabled=True
                  ):
         """
         ``executor_threads`` defines the number of threads in a pool for handling asynchronous tasks such as
@@ -1467,6 +1510,18 @@ class Cluster(object):
             from cassandra.metrics import Metrics
             self.metrics = Metrics(weakref.proxy(self))
 
+        # Both are read by _make_connection_kwargs, so they have to be in place
+        # before anything can open a connection.
+        #
+        # The session id is generated unconditionally: every connection reports
+        # it, whatever driver_config_reporting_enabled is set to.
+        self._session_id = uuid.uuid4()
+        self.driver_config_reporting_enabled = driver_config_reporting_enabled
+        # Built whatever the flag says, so that the flag is the only thing that
+        # decides whether a connection reports: see _make_connection_kwargs. The
+        # reporter holds no state, so an unused one costs nothing.
+        self._driver_config_reporter = DriverConfigReporter()
+
         self.control_connection = ControlConnection(
             self, self.control_connection_timeout,
             self.schema_event_refresh_window, self.topology_event_refresh_window,
@@ -1642,6 +1697,16 @@ class Cluster(object):
         kwargs_dict.setdefault('allow_beta_protocol_version', self.allow_beta_protocol_version)
         kwargs_dict.setdefault('no_compact', self.no_compact)
         kwargs_dict.setdefault('application_info', self.application_info)
+
+        # Assigned rather than defaulted, unlike everything above: both describe
+        # this Cluster to the server, so a caller must not be able to substitute
+        # them. A connection reports whatever session id it is handed, which
+        # would break the correlation the option exists for, and a reporter
+        # passed in here would report a configuration that
+        # driver_config_reporting_enabled turned off.
+        kwargs_dict['session_id'] = self.session_id
+        kwargs_dict['driver_config_reporter'] = \
+            self._driver_config_reporter if self.driver_config_reporting_enabled else None
 
         return kwargs_dict
 
@@ -2528,6 +2593,10 @@ class Session(object):
     session_id = None
     """
     A UUID that uniquely identifies this Session. This will be generated automatically.
+
+    This is not the identifier reported to the cluster in the ``SESSION_ID``
+    startup option: that one is per-:class:`~.Cluster` and shared by every
+    connection, see :attr:`.Cluster.session_id`.
     """
 
     _lock = None
