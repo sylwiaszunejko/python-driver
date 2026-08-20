@@ -671,6 +671,26 @@ def is_scylla_enterprise(version: Version) -> bool:
     return version > Version('2000.1.1')
 
 
+def get_client_options(session):
+    """
+    The ``client_options`` of every connection listed in the cluster's clients
+    table, skipping the rows the server has not filled in yet.
+
+    The table has lived in both ``system`` and ``system_views`` across versions,
+    so try each in turn. Only :exc:`.InvalidRequest` is caught, which is what an
+    absent table answers with: catching more would report a timeout or a
+    ``NoHostAvailable`` on the first query as a failure of the second, and this
+    runs inside polling loops where that would repeat.
+    """
+    try:
+        rows = list(session.execute("SELECT client_options FROM system.clients"))
+    except InvalidRequest:
+        rows = list(session.execute("SELECT client_options FROM system_views.clients"))
+    # Indexed rather than named: the query selects the one column, so this works
+    # whatever row factory the caller's session is using.
+    return [row[0] for row in rows if row[0]]
+
+
 def xfail_scylla_version_lt(reason, scylla_version, *args, **kwargs):
     """
     It is used to mark tests that are going to fail on certain scylla versions.
