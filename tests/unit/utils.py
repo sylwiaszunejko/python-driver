@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from concurrent.futures import Future
 from cassandra.cluster import Session
+from cassandra.driver_config import DriverConfigReporter
 
 
 def mock_session_pools(f):
@@ -32,3 +33,16 @@ def mock_session_pools(f):
             mocked_add_or_renew_pool.return_value = future
             f(*args, **kwargs)
     return wrapper
+
+
+class ThrowingReporter(DriverConfigReporter):
+    """
+    A driver configuration reporter whose report cannot be built.
+
+    Shared because two suites need it: the reporter's own tests, for the guard
+    that drops a report it cannot build, and the connection tests, for the
+    guarantee that such a failure leaves the STARTUP frame otherwise intact
+    instead of failing the connection.
+    """
+    def _build_report(self):
+        raise ValueError("simulated failure while building the report")
